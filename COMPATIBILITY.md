@@ -42,6 +42,64 @@ domain knowledge and attention projections handle formatting/instruction.
 | QLoRA (4-bit + LoRA) | ~12-16 GB |
 | QLoRA + gradient checkpointing | ~10-13 GB |
 
+## ZAYA XML Tool-Call Format
+
+ZAYA1-8B uses a JSON-inside-XML format via vLLM's `--tool-call-parser zaya_xml`:
+
+```xml
+<tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>
+```
+
+**Critical distinction**: This differs from Godspeed's native Qwen3-Coder XML format
+(`<function=name>`) and from OpenAI-standard `tool_calls` JSON. Training data MUST
+use the ZAYA XML format. A remapper (`scripts/remap_to_zaya.py`) converts Godspeed
+conversation JSONL to this format with quality gates applied.
+
+The ZAYA1-8B chat template uses Qwen-style tokens:
+```
+<|im_start|>system
+You are Godspeed...
+<|im_end|>
+<|im_start|>user
+Fix the bug in this codebase...
+<|im_end|>
+<|im_start|>assistant
+<think>
+Let me explore the codebase first.
+</think>
+
+<tool_call>{"name": "glob_search", "arguments": {"pattern": "**/*.py"}}</tool_call>
+<|im_end|>
+<|im_start|>tool
+src/main.py
+src/config.py
+src/models.py
+<|im_end|>
+```
+
+**No external `quantization_config` needed**: When loading a pre-quantized
+model, use the model's stored config:
+
+```python
+model = AutoModelForCausalLM.from_pretrained(
+    "Zyphra/ZAYA1-8B",
+    device_map="auto",
+    trust_remote_code=True,
+)
+```
+
+## Agentic Gap (Per Technical Report)
+
+ZAYA1-8B's technical report confirms the agentic gap is intentional:
+
+> "ZAYA1-8B does not include a dedicated multi-turn agentic RL stage in this
+> release. We include some supervised agent, tool, and SWE traces during SFT,
+> but the RL cascade is primarily optimized for verifiable reasoning, math,
+> code, and instruction-following behavior."
+
+This means ZAYA1-8B already has some tool-use exposure from its supervised
+fine-tuning stage. The fine-tuning task is distribution extension, not cold start.
+
 ## Inference Paths
 
 | Path | Status | Speed | Notes |
@@ -51,37 +109,34 @@ domain knowledge and attention projections handle formatting/instruction.
 | **GGUF / llama.cpp** | ❌ Blocked | N/A | Zaya architecture not supported ([llama.cpp#22776](https://github.com/ggml-org/llama.cpp/issues/22776)). |
 | **Zyphra Cloud** | Available | API latency | Serverless endpoint at cloud.zyphra.com. Needs API key. |
 
-### Model loading with the Zyphra fork
-
-The model requires the Zyphra transformers fork:
-
-```bash
-pip install "transformers @ git+https://github.com/Zyphra/transformers.git@zaya1"
-```
-
-**Critical**: Do NOT pass `quantization_config` when loading a pre-quantized
-model. Use the model's stored config:
-
-```python
-# CORRECT — no external quantization_config
-model = AutoModelForCausalLM.from_pretrained(
-    "Zyphra/ZAYA1-8B",
-    device_map="auto",
-    trust_remote_code=True,
-)
-```
-
 ### vLLM deployment
 
 ```bash
+# Full context (24 GB+ cards)
 vllm serve Zyphra/ZAYA1-8B --port 8010 \
     --mamba-cache-dtype float32 --dtype bfloat16 \
     --reasoning-parser qwen3 --enable-auto-tool-choice \
     --tool-call-parser zaya_xml \
     --max-num-seqs 2 --max-model-len 48000
+
+# 16 GB cards (use serve_zaya1.py)
+python scripts/serve_zaya1.py --max-model-len 24000 --max-num-seqs 2
 ```
 
-For 16 GB cards, reduce `--max-model-len` to 24000–32000.
+Requires the Zyphra vLLM fork built in WSL (see `scripts/build_vllm_detached.sh`).
+
+## DeepSeek V4 Pro Teacher (NVIDIA NIM)
+
+Trajectory generation uses DeepSeek V4 Pro via NVIDIA NIM as the teacher model:
+
+- **Model ID**: `nvidia_nim/deepseek-ai/deepseek-v4-pro`
+- **SWE-bench Verified**: 80.6% | **LiveCodeBench**: 93.5% | **Codeforces**: 3,206
+- **Architecture**: MoE, 1.6T total / 49B active per token, 1M context
+- **Availability**: NVIDIA NIM free tier (R&D), 4 API keys for rate limit rotation
+- **Rate limit**: ~30 RPM per key → ~120 RPM effective with rotation
+
+Godspeed routes to NIM via its existing `nvidia_nim/` provider prefix
+(confirmed working in benchmark shootout, April 2026).
 
 ## Training Strategy
 
@@ -91,12 +146,12 @@ Fine-tune ZAYA1-8B for structured multi-step tool calling with Godspeed's
 tool schema. Target the agentic failure mode: the model has strong reasoning
 but was not trained for iterative tool use.
 
-### Data Pipeline
+### Pipeline
 
-1. Run Godspeed with a strong API model (Claude/GPT) on the benchmark suite
-2. Log all conversations + per-step reward annotations
-3. Export successful tool-call trajectories
-4. Format as instruction tuning data (system_prompt → plan → tool_call → result)
+1. **Teach** — Run Godspeed headless with DeepSeek V4 Pro against 200+ mutated tasks
+2. **Filter** — `remap_to_zaya.py` applies 5 quality gates (exit code, Jaccard, dangerous commands, schema errors, token budget)
+3. **SFT** — QLoRA training on 300–500 verified trajectories (1–2 epochs)
+4. **GRPO** — Policy improvement with verifiable rewards (mechanical verify as primary signal)
 
 ### LoRA Targeting
 
@@ -110,8 +165,9 @@ See `configs/lora_tool_call.yaml`.
 
 ## References
 
-- [ZAYA1-8B Technical Report](https://arxiv.org/abs/2605.05365)
+- [ZAYA1-8B Technical Report (arXiv 2605.05365)](https://arxiv.org/abs/2605.05365)
 - [Zyphra Blog Post](https://www.zyphra.com/post/zaya1-8b)
 - [Zyphra vLLM Fork](https://github.com/Zyphra/vllm/tree/zaya1-pr)
 - [Zyphra Transformers Fork](https://github.com/Zyphra/transformers/tree/zaya1)
+- [NVIDIA NIM — DeepSeek V4 Pro](https://build.nvidia.com/deepseek-ai/deepseek-v4-pro)
 - [Godspeed Coding Agent](https://github.com/omnipotence-eth/godspeed-coding-agent)

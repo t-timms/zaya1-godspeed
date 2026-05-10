@@ -1,0 +1,17 @@
+[project]
+name = "zaya1-godspeed"
+version = "0.1.0"
+description = "Fine-tuning Zyphra's ZAYA1-8B for structured tool calling"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+readme = "README.md"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

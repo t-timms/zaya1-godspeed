@@ -1,5 +1,11 @@
 # zaya1-godspeed
 
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://www.python.org/downloads/)
+[![Unsloth](https://img.shields.io/badge/Unsloth-2026.5.2-6C4DFF?style=flat-square)](https://unsloth.ai)
+[![TRL](https://img.shields.io/badge/TRL-v0.24.0-orange?style=flat-square)](https://github.com/huggingface/trl)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json&style=flat-square)](https://github.com/astral-sh/ruff)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](./LICENSE)
+
 Fine-tuning Zyphra's ZAYA1-8B for structured multi-turn tool calling with the
 [Godspeed coding agent](https://github.com/omnipotence-eth/godspeed-coding-agent).
 

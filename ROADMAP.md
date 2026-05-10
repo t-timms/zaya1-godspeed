@@ -38,25 +38,23 @@ the current Qwen2.5-Coder-14B default while using less VRAM and running faster.
 
 ---
 
-## Phase 2 — Inference Pipeline 🔴
+## Phase 2 — Inference Pipeline 🟡
 
 **Goal**: Serve ZAYA1-8B via an OpenAI-compatible endpoint at usable speed.
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Build vLLM (Zyphra fork) in WSL | 🔴 | Needs `CUDA_HOME=/usr/local/cuda-12.8` + `MAX_JOBS=1`. 16 GB WSL now provisioned. |
-| Serve ZAYA1-8B via vLLM | ⬜ | `vllm serve Zyphra/ZAYA1-8B --tool-call-parser zaya_xml` |
+| Build vLLM (Zyphra fork) in WSL | ✅ | CUDA 13.2 toolkit, 64 GB WSL, MAX_JOBS=10. 65-minute build. `scripts/build_vllm_detached.sh`. |
+| Serve ZAYA1-8B via vLLM | 🟡 | Architecture resolved correctly (ZayaForCausalLM). Blocked: Windows desktop VRAM (12GB). Needs reboot or Cloud API. |
 | Verify generation quality (coding prompts) | ⬜ | Test with Godspeed-style system prompts |
 | Benchmark throughput on RTX 5070 Ti (16 GB) | ⬜ | Target: 50+ tok/s via vLLM |
-| Fix serve_zaya1.py in Godspeed repo | ⬜ | Remove broken NF4 path, document vLLM requirement |
+| Fix serve_zaya1.py in Godspeed repo | ✅ | `scripts/serve_zaya1.py` with n-gram speculation + tool-call support |
 | NF4 path (transformers) | ❌ | Confirmed broken — bitsandbytes dequant incompatible with CCA attention |
 
-**Blockers**:
-- vLLM build from source in WSL (~40 min compilation). Fix: set `CUDA_HOME`
-  and `MAX_JOBS=1` explicitly. The CUDA toolkit is at `/usr/local/cuda-12.8`.
+**Blocker**: Windows desktop compositor uses 12 GB VRAM. Cold reboot frees 14+ GB, enough for BF16 model loading.
+**Blocker**: Windows desktop compositor uses 12 GB VRAM. Cold reboot frees 14+ GB, enough for BF16 model loading.
 
-**Alternative (interim)**: Zyphra Cloud API at cloud.zyphra.com — serverless
-endpoint, no local build needed. Could wire up to Godspeed immediately.
+**Alternative (interim)**: Zyphra Cloud API at cloud.zyphra.com — no local VRAM needed.
 
 ---
 
@@ -75,28 +73,29 @@ endpoint, no local build needed. Could wire up to Godspeed immediately.
 
 ---
 
-## Phase 4 — Training Data Generation ⬜
+## Phase 4 — Training Data Generation 🟡
 
 **Goal**: Produce 500–2K high-quality tool-calling trajectories for fine-tuning.
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Data pipeline script | ✅ | `data/generate.py` — extracts trajectories from Godspeed JSONL, filters quality, outputs ChatML |
 | Run Godspeed benchmark suite with strong API model | ⬜ | Claude/GPT as actor to generate clean trajectories |
 | Export sessions from Godspeed audit trail | ⬜ | JSONL with per-step reward annotations |
 | Filter for successful tool-call sequences | ⬜ | No rejected/retried tool calls in trajectory |
-| Convert to ShareGPT/ChatML format | ⬜ | `data/generate.py` stub exists |
+| Convert to ChatML format | ✅ | Auto-handled by `data/generate.py` |
 | Validate schema coverage (all 30+ Godspeed tools represented) | ⬜ | |
 | Split train/val/eval | ⬜ | 80/10/10 split |
 
 ---
 
-## Phase 5 — QLoRA Fine-Tuning ⬜
+## Phase 5 — QLoRA Fine-Tuning 🟡
 
 **Goal**: Train ZAYA1-8B to produce valid tool calls in Godspeed's XML/JSON format.
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Set up training script with TRL SFTTrainer | ⬜ | Use `configs/lora_tool_call.yaml` |
+| Training script with TRL SFTTrainer | ✅ | `scripts/train.py` — QLoRA with config-driven pipeline, dry-run support |
 | Dry run (1 batch, no save) to catch OOM | ⬜ | Target: <12 GB VRAM |
 | Full training run (3 epochs, ~500-2K examples) | ⬜ | `WANDB_MODE=offline` on Windows |
 | Save LoRA adapter weights | ⬜ | |

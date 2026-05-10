@@ -19,13 +19,17 @@ python scripts/test_peft.py   # verify PEFT compatibility
 ```
 zaya1-godspeed/
 ├── scripts/
-│   ├── test_peft.py          # PEFT LoRA attach + gradient flow test
-│   └── serve.py              # vLLM server launcher for ZAYA1-8B
+│   ├── train.py               # QLoRA fine-tuning with TRL SFTTrainer
+│   ├── serve_zaya1.py          # vLLM server launcher (n-gram spec, tool-call support)
+│   ├── serve.py                # vLLM server launcher for base model
+│   ├── test_peft.py            # PEFT LoRA attach + gradient flow test
+│   └── build_vllm_detached.sh  # Reliable Zyphra vLLM fork build (WSL)
 ├── configs/
-│   └── lora_tool_call.yaml   # QLoRA config for tool-calling fine-tune
+│   └── lora_tool_call.yaml     # QLoRA config for tool-calling fine-tune
 ├── data/
-│   └── generate.py           # Convert Godspeed sessions to training data
-├── COMPATIBILITY.md           # Architecture analysis & PEFT gate results
+│   └── generate.py             # Convert Godspeed sessions to ChatML training data
+├── COMPATIBILITY.md             # Architecture analysis & PEFT gate results
+├── ROADMAP.md                   # 7-phase project plan with status tracking
 └── README.md
 ```
 

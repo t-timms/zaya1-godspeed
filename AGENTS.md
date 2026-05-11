@@ -25,9 +25,16 @@ and MOD skip expert. Use `ensure_weight_tying=True` because `tie_word_embeddings
 
 ### Training constraints
 - Epochs: 1-2 max. Hard stop if AIME degrades >5% from 89.1%.
-- VRAM budget: 10-12 GB (QLoRA on 16 GB). NF4 base model uses ~7.2 GB.
+- VRAM budget: ~9.5-11.5 GB (QLoRA on 16 GB). NF4 base model uses ~7.2 GB + double quantization saves ~0.36 GB.
 - Chat template: `chat_template_kwargs={"enable_thinking": True}` required.
 - GRPO uses `loss_type="dapo"`, `scale_rewards="batch"`, `num_generations=4`.
+- QLoRA quant: NF4 with double quantization (`bnb_4bit_use_double_quant: true`). Bitsandbytes does not officially support 4-bit on MoE `nn.Parameter` tensors — LoRA on attention projections only (not experts) avoids this.
+
+### Known limitations
+- QLoRA + MoE: bitsandbytes 4-bit quantization is not validated for MoE architectures. Our LoRA targets attention projections only, not expert weights, so training is safe but monitor for quality issues.
+- NF4 dequant on CCA attention: documented as broken in `COMPATIBILITY.md` — inference via NF4+transformers produces garbage output. Use vLLM for inference.
+- Unsloth MoE Triton kernels: would provide 2-12x faster training but ZAYA's `SequentialMLP` architecture isn't tested with Unsloth yet. Worth trying `FastLanguageModel.from_pretrained("Zyphra/ZAYA1-8B")` when GPU is available.
+- Double quantization: added May 2026 — saves ~0.36 GB per QLoRA paper benchmarks (was the difference between OOM and success on 16GB GPUs).
 
 ### Upstream boundaries (DO NOT CHANGE)
 These ZAYA innovations must not be touched:
@@ -53,7 +60,8 @@ These ZAYA innovations must not be touched:
 | `scripts/train_grpo.py` | GRPO policy improvement | Uses GRPOConfig, dapo loss, vLLM colocate |
 | `scripts/mutate_tasks.py` | 200+ variant tasks | 6 mutation types, 30% OOD minimum |
 | `data/generate.py` | Godspeed → ChatML extraction | Legacy — prefer remap_to_zaya.py |
-| `configs/lora_tool_call.yaml` | Single source of truth for hyperparams | rsLoRA, chunked_nll, Liger Kernel enabled |
+| `configs/lora_tool_call.yaml` | Single source of truth for hyperparams | rsLoRA, chunked_nll, Liger Kernel, double quant |
+| `patches/` | Runtime monkey-patches + upstream PR docs | `apply_zaya_patches.py` auto-runs in train.py/train_grpo.py |
 | `tests/` | 100 unit tests | Run before any commit |
 
 ## Development workflow

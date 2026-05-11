@@ -116,7 +116,8 @@ The fix was verified by cross-referencing:
 | Epochs | 2 | 1-2 epochs max per project constraints |
 | Learning rate | 2e-4 | Higher LR for LoRA adapters |
 | Gradient checkpointing | True | Reduces activation memory |
-| VRAM budget | ~10-12 GB | Fits on 16 GB GPU |
+| bnb_4bit_use_double_quant | True | Nested quantization saves ~0.36 GB on NF4 base per QLoRA paper |
+| VRAM budget | ~9.5-11.5 GB | Reduced from ~10-12 GB by double quantization |
 
 #### Stage 2: GRPO (`scripts/train_grpo.py`)
 

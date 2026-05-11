@@ -1,8 +1,22 @@
 # QLoRA fine-tuning config for ZAYA1-8B tool-calling
 # Targeted at the agentic weakness: structured multi-step tool use
 # Targets attention projections only — not expert weights
+#
+# SOTA improvements (May 2026):
+#   - rsLoRA: rank-stabilized scaling (lora_alpha / sqrt(r))
+#   - PiSSA: principal singular value initialization (faster convergence)
+#   - chunked_nll: 60% memory reduction via chunked cross-entropy
 
 # ── Model ──────────────────────────────────────────────────────
+# ZAYA1-8B: 80 layers (40 CCA attention + 40 MoE interleaved)
+# rope_theta=5,000,000 | max_position_embeddings=131,072
+# 16 experts, top-1 routing, EDA depth-wise averaging, MOD skip expert
+# tie_word_embeddings=True → ensure_weight_tying=True in PEFT
+# Custom ZayaForCausalLM → requires trust_remote_code=True
+#
+# MoE aux loss note: ZayaConfig does not expose output_router_logits.
+# During QLoRA SFT (frozen base), expert collapse is not a concern.
+# During GRPO (if router weights are trainable), monitor expert utilization.
 model:
   name_or_path: "Zyphra/ZAYA1-8B"
   trust_remote_code: true
@@ -27,6 +41,8 @@ lora:
     - "val_proj2"    # value projection 2 (CCA)
   lora_dropout: 0.05
   bias: "none"
+  use_rslora: true              # rank-stabilized LoRA: scales by alpha/sqrt(r)
+  init_lora_weights: "pissa"    # principal singular value init (faster convergence)
 
 # ── Training ───────────────────────────────────────────────────
 training:
@@ -35,12 +51,15 @@ training:
   learning_rate: 2.0e-4
   lr_scheduler_type: "cosine"
   warmup_ratio: 0.1
-  num_train_epochs: 3
+  num_train_epochs: 2
   max_seq_length: 4096
   gradient_checkpointing: true
+  packing: false
   fp16: false
   bf16: true
   optim: "adamw_8bit"
+  loss_type: "chunked_nll"      # 60% memory reduction via chunked cross-entropy
+  use_liger_kernel: true         # 20% throughput, 60% memory via Triton kernels
   logging_steps: 10
   save_steps: 200
   eval_steps: 200

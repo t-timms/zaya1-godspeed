@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -47,7 +46,10 @@ def parse_conversation(filepath: Path) -> list[dict[str, str]] | None:
             line = line.strip()
             if not line:
                 continue
-            entry = json.loads(line)
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             role = entry.get("role", "")
             content = entry.get("content", "")
 
@@ -76,7 +78,7 @@ def parse_conversation(filepath: Path) -> list[dict[str, str]] | None:
 
 def _has_tool_use(messages: list[dict[str, str]]) -> bool:
     for m in messages:
-        if m["role"] == "assistant" and ("<tool_call>" in m["content"] or '"name":' in m["content"]):
+        if m["role"] == "assistant" and ("<zyphra_tool_call>" in m["content"] or '"name":' in m["content"]):
             return True
     return False
 

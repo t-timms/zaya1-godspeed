@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
-import sys
 
 
 def main() -> None:
@@ -41,6 +40,7 @@ def main() -> None:
         f"vllm serve {args.model_id} "
         f"--port {args.port} "
         f"--dtype bfloat16 "
+        f"--mamba-cache-dtype float32 "
         f"--reasoning-parser qwen3 "
         f"--enable-auto-tool-choice "
         f"--tool-call-parser zaya_xml "

@@ -3,8 +3,12 @@
 Trains attention projection LoRA adapters on structured tool-call
 trajectories so ZAYA1-8B can drive the Godspeed agent loop.
 
+Uses TRL SFTTrainer with SFTConfig for SOTA training: assistant_only_loss,
+packing, native conversational dataset format, and automatic chat template
+application.
+
 Usage:
-    python scripts/train.py --data data/train.jsonl --config configs/lora_tool_call.yaml
+    python scripts/train.py --data data/train_zaya.jsonl --config configs/lora_tool_call.yaml
 """
 
 from __future__ import annotations
@@ -12,9 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
-from pathlib import Path
 
 import torch
 import yaml
@@ -26,10 +28,11 @@ logger = logging.getLogger(__name__)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="QLoRA fine-tune ZAYA1-8B for tool calling")
     parser.add_argument("--config", default="configs/lora_tool_call.yaml")
-    parser.add_argument("--data", default="data/train.jsonl")
+    parser.add_argument("--data", default="data/train_zaya.jsonl")
     parser.add_argument("--output", default="checkpoints/zaya1-tool-call")
     parser.add_argument("--dry-run", action="store_true", help="One batch, no save")
     parser.add_argument("--resume", help="Resume from checkpoint")
+    parser.add_argument("--eval-data", help="Optional eval dataset JSONL")
     return parser.parse_args()
 
 
@@ -38,24 +41,15 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def load_dataset(path: str) -> list[dict]:
+def load_jsonl(path: str) -> list[dict]:
     data: list[dict] = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
                 data.append(json.loads(line))
-    logger.info("Loaded %d training examples", len(data))
+    logger.info("Loaded %d examples from %s", len(data), path)
     return data
-
-
-def format_chatml(example: dict, tokenizer) -> str:
-    messages = example["messages"]
-    return tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=False,
-    )
 
 
 def check_vram() -> None:
@@ -76,29 +70,30 @@ def main() -> None:
 
     check_vram()
 
-    from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
-    from transformers import (
-        AutoModelForCausalLM,
-        AutoTokenizer,
-        BitsAndBytesConfig,
-        Trainer,
-        TrainingArguments,
-        DataCollatorForLanguageModeling,
-    )
     from datasets import Dataset
+    from trl import SFTConfig, SFTTrainer
 
     model_cfg = cfg["model"]
     quant_cfg = cfg["quantization"]
     lora_cfg = cfg["lora"]
     train_cfg = cfg["training"]
 
-    logger.info("Loading tokenizer: %s", model_cfg["name_or_path"])
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_cfg["name_or_path"],
-        trust_remote_code=True,
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    logger.info("Loading training data: %s", args.data)
+    raw_data = load_jsonl(args.data)
+    if not raw_data:
+        logger.error("No training data found")
+        sys.exit(1)
+
+    train_dataset = Dataset.from_list(raw_data)
+
+    eval_dataset = None
+    if args.eval_data:
+        eval_raw = load_jsonl(args.eval_data)
+        if eval_raw:
+            eval_dataset = Dataset.from_list(eval_raw)
+
+    from peft import LoraConfig, TaskType
+    from transformers import BitsAndBytesConfig
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=quant_cfg["load_in_4bit"],
@@ -107,17 +102,6 @@ def main() -> None:
         bnb_4bit_use_double_quant=quant_cfg["bnb_4bit_use_double_quant"],
     )
 
-    logger.info("Loading model: %s", model_cfg["name_or_path"])
-    model = AutoModelForCausalLM.from_pretrained(
-        model_cfg["name_or_path"],
-        trust_remote_code=True,
-        quantization_config=bnb_config,
-        device_map="auto",
-        torch_dtype=getattr(torch, model_cfg["torch_dtype"]),
-    )
-    model = prepare_model_for_kbit_training(model)
-    model.config.use_cache = False
-
     peft_config = LoraConfig(
         r=lora_cfg["r"],
         lora_alpha=lora_cfg["lora_alpha"],
@@ -125,31 +109,12 @@ def main() -> None:
         lora_dropout=lora_cfg["lora_dropout"],
         bias=lora_cfg["bias"],
         task_type=TaskType.CAUSAL_LM,
+        use_rslora=lora_cfg.get("use_rslora", False),
+        init_lora_weights=lora_cfg.get("init_lora_weights", "default"),
+        ensure_weight_tying=True,
     )
 
-    logger.info("Attaching LoRA adapters")
-    model = get_peft_model(model, peft_config)
-    model.print_trainable_parameters()
-
-    logger.info("Loading dataset: %s", args.data)
-    raw_data = load_dataset(args.data)
-    if not raw_data:
-        logger.error("No training data found")
-        sys.exit(1)
-
-    def tokenize_fn(examples):
-        texts = [format_chatml(ex, tokenizer) for ex in examples["messages"]]
-        return tokenizer(
-            texts,
-            truncation=True,
-            max_length=train_cfg["max_seq_length"],
-            padding=False,
-        )
-
-    dataset = Dataset.from_list([{"messages": ex} for ex in raw_data])
-    tokenized = dataset.map(tokenize_fn, batched=True, remove_columns=dataset.column_names)
-
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         output_dir=args.output,
         per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
         gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
@@ -157,6 +122,7 @@ def main() -> None:
         lr_scheduler_type=train_cfg["lr_scheduler_type"],
         warmup_ratio=train_cfg["warmup_ratio"],
         num_train_epochs=train_cfg["num_train_epochs"],
+        max_seq_length=train_cfg["max_seq_length"],
         logging_steps=train_cfg["logging_steps"],
         save_steps=train_cfg["save_steps"],
         save_total_limit=train_cfg["save_total_limit"],
@@ -164,18 +130,27 @@ def main() -> None:
         fp16=train_cfg["fp16"],
         optim=train_cfg["optim"],
         gradient_checkpointing=train_cfg["gradient_checkpointing"],
+        loss_type=train_cfg.get("loss_type", "nll"),
+        use_liger_kernel=train_cfg.get("use_liger_kernel", False),
+        chat_template_kwargs={"enable_thinking": True},
         max_steps=1 if args.dry_run else -1,
         report_to=[],
-        remove_unused_columns=False,
+        packing=train_cfg.get("packing", False),
+        assistant_only_loss=True,
+        model_init_kwargs={
+            "trust_remote_code": True,
+            "quantization_config": bnb_config,
+            "device_map": "auto",
+            "torch_dtype": getattr(torch, model_cfg["torch_dtype"]),
+        },
     )
 
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-
-    trainer = Trainer(
-        model=model,
+    trainer = SFTTrainer(
+        model=model_cfg["name_or_path"],
         args=training_args,
-        train_dataset=tokenized,
-        data_collator=data_collator,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        peft_config=peft_config,
     )
 
     if args.dry_run:
@@ -185,8 +160,7 @@ def main() -> None:
 
     if not args.dry_run:
         logger.info("Saving adapter to %s", args.output)
-        model.save_pretrained(args.output)
-        tokenizer.save_pretrained(args.output)
+        trainer.save_model(args.output)
         logger.info("Training complete")
 
 

@@ -103,7 +103,7 @@ fixing quality.
 
 ZAYA1-8B uses a JSON-inside-XML format via vLLM's `--tool-call-parser zaya_xml`:
 ```
-<tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>
+<zyphra_tool_call>{"name": "tool_name", "arguments": {...}}</zyphra_tool_call>
 ```
 
 This differs from Godspeed's native Qwen3-Coder XML format (`<function=name>`) and

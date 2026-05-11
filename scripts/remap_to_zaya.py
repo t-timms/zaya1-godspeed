@@ -1,7 +1,11 @@
 """Remap Godspeed conversation JSONL to ZAYA1-8B ChatML training format.
 
-ZAYA1-8B uses a JSON-inside-XML tool call format via vLLM's zaya_xml parser:
-    <tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>
+ZAYA1-8B uses a JSON-inside-XML tool call format via vLLM's zaya_xml parser.
+Uses special tokens: <zyphra_tool_call> (token 101), </zyphra_tool_call> (token 102),
+<zyphra_tool_response> (token 103), </zyphra_tool_response> (token 104).
+Format:
+    <zyphra_tool_call>{"name": "tool_name", "arguments": {...}}</zyphra_tool_call>
+    <zyphra_tool_response>result text</zyphra_tool_response>
 
 This differs from Godspeed's native Qwen3-Coder XML format and from the
 OpenAI-standard tool_calls JSON. The remapper extracts conversation messages
@@ -40,13 +44,18 @@ from typing import Any
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-_ZAYA_TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_ZAYA_TOOL_CALL_RE = re.compile(r"<zyphra_tool_call>(.*?)</zyphra_tool_call>", re.DOTALL)
 
 
 def format_zaya_tool_call(name: str, arguments: dict[str, Any]) -> str:
     """Format a tool call in ZAYA1-8B's expected XML+JSON format."""
     payload = json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False)
-    return f"<tool_call>{payload}</tool_call>"
+    return f"<zyphra_tool_call>{payload}</zyphra_tool_call>"
+
+
+def format_zaya_tool_response(content: str) -> str:
+    """Format a tool response in ZAYA1-8B's expected XML format."""
+    return f"<zyphra_tool_response>{content}</zyphra_tool_response>"
 
 
 def _extract_tool_calls_from_content(content: str) -> list[dict[str, Any]]:
@@ -101,10 +110,8 @@ def _parse_godspeed_message(msg: dict[str, Any]) -> dict[str, Any] | None:
         return {"role": "assistant", "content": content}
 
     if role == "tool":
-        tool_name = msg.get("name", "")
         tool_content = msg.get("content", "")
-        prefix = f"[{tool_name} result]\n" if tool_name else ""
-        return {"role": "tool", "content": prefix + tool_content}
+        return {"role": "tool", "content": format_zaya_tool_response(tool_content)}
 
     if role == "session_end":
         return None
@@ -192,15 +199,51 @@ def load_expected_tools(path: str | None) -> dict[str, set[str]]:
     return expected
 
 
+def load_task_id_map(path: str) -> dict[str, str]:
+    """Load a JSON file mapping filename stems to task IDs.
+
+    Expected format (JSONL):
+        {"stem": "task-01.2025-01-01", "task_id": "task-01"}
+
+    Or as a plain JSON dict:
+        {"task-01.2025-01-01": "task-01"}
+    """
+    p = Path(path)
+    if not p.exists():
+        logger.warning("Task ID map not found: %s", p)
+        return {}
+    with open(p, encoding="utf-8") as f:
+        text = f.read().strip()
+    if text.startswith("{"):
+        return json.loads(text)
+    mapping: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        mapping[entry["stem"]] = entry["task_id"]
+    return mapping
+
+
 def remap_session(
     filepath: Path,
     expected_tools: dict[str, set[str]],
     min_jaccard: float = 0.7,
     max_tokens: int = 4096,
+    task_id_map: dict[str, str] | None = None,
 ) -> dict | None:
     """Remap a single Godspeed conversation file to ZAYA ChatML format.
 
     Returns None if the session fails quality gates.
+
+    Args:
+        filepath: Path to a Godspeed .conversation.jsonl file.
+        expected_tools: Dict mapping task_id -> set of expected tool names.
+        min_jaccard: Minimum Jaccard similarity threshold.
+        max_tokens: Maximum estimated tokens for the trajectory.
+        task_id_map: Optional dict mapping filename stems to task_ids for
+                     robust matching. Falls back to substring matching if None.
     """
     raw_messages: list[dict[str, Any]] = []
     with open(filepath, encoding="utf-8") as f:
@@ -256,10 +299,16 @@ def remap_session(
     tools_used = _tool_names_used(chatml_messages)
     if expected_tools:
         best_jaccard = 0.0
-        task_id = filepath.stem.split(".")[0]
-        for tid, expected in expected_tools.items():
-            if tid in filepath.name or task_id in tid:
-                best_jaccard = max(best_jaccard, _jaccard_similarity(tools_used, expected))
+        stem = filepath.stem.split(".")[0]
+
+        if task_id_map and stem in task_id_map:
+            tid = task_id_map[stem]
+            if tid in expected_tools:
+                best_jaccard = _jaccard_similarity(tools_used, expected_tools[tid])
+        else:
+            for tid, expected in expected_tools.items():
+                if tid in filepath.name or stem in tid:
+                    best_jaccard = max(best_jaccard, _jaccard_similarity(tools_used, expected))
 
         if best_jaccard < min_jaccard:
             logger.debug(
@@ -279,14 +328,141 @@ def remap_session(
     return {"messages": chatml_messages}
 
 
+def get_default_tools_schema() -> list[dict[str, object]]:
+    """Return the default Godspeed tool JSON schemas for TRL tool-calling format.
+
+    These match the 30+ Godspeed tools used in the agent loop.
+    Update with actual tool definitions from Godspeed's tool registry.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "glob_search",
+                "description": "Search for files matching a glob pattern.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.py'"},
+                    },
+                    "required": ["pattern"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "grep_search",
+                "description": "Search file contents with regex.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                    },
+                    "required": ["pattern"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "file_read",
+                "description": "Read a file's contents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the file"},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "file_write",
+                "description": "Write content to a file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the file"},
+                        "content": {"type": "string", "description": "Content to write"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "file_edit",
+                "description": "Edit a file by replacing text.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the file"},
+                        "old_string": {"type": "string", "description": "Text to replace"},
+                        "new_string": {"type": "string", "description": "Replacement text"},
+                    },
+                    "required": ["path", "old_string", "new_string"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "shell",
+                "description": "Run a shell command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Shell command to run"},
+                    },
+                    "required": ["command"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "test_runner",
+                "description": "Run tests.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Test command to run"},
+                    },
+                    "required": ["command"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "verify",
+                "description": "Verify a change or hypothesis.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {"type": "string", "description": "What to verify"},
+                    },
+                    "required": ["statement"],
+                },
+            },
+        },
+    ]
+
+
 def remap_directory(
     input_dir: str,
     output_path: str,
     expected_tools_path: str | None = None,
+    task_id_map_path: str | None = None,
     min_jaccard: float = 0.7,
     max_tokens: int = 4096,
     max_examples: int = 500,
     dry_run: bool = False,
+    include_tools: bool = False,
 ) -> int:
     """Remap all Godspeed sessions in a directory to ZAYA ChatML format."""
     input_path = Path(input_dir)
@@ -295,6 +471,11 @@ def remap_directory(
         return 0
 
     expected_tools = load_expected_tools(expected_tools_path)
+
+    task_id_map: dict[str, str] = {}
+    if task_id_map_path:
+        task_id_map = load_task_id_map(task_id_map_path)
+
     files = sorted(input_path.glob("*.conversation.jsonl"))
 
     if not files:
@@ -311,12 +492,20 @@ def remap_directory(
 
     with open(output_file, "w", encoding="utf-8") as out_f:
         for fp in files:
-            result = remap_session(fp, expected_tools, min_jaccard, max_tokens)
+            result = remap_session(
+                fp,
+                expected_tools,
+                min_jaccard,
+                max_tokens,
+                task_id_map=task_id_map if task_id_map else None,
+            )
             if result is None:
                 skipped += 1
                 continue
 
             if not dry_run:
+                if include_tools:
+                    result["tools"] = get_default_tools_schema()
                 out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
             written += 1
@@ -358,10 +547,15 @@ def main() -> None:
         "--expected-tools",
         help="Path to benchmarks/tasks.jsonl for Jaccard scoring",
     )
+    parser.add_argument(
+        "--task-id-map",
+        help="Path to JSON/JSONL mapping filename stems to task IDs",
+    )
     parser.add_argument("--min-jaccard", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--max-examples", type=int, default=500)
     parser.add_argument("--dry-run", action="store_true", help="Count passes without writing")
+    parser.add_argument("--include-tools", action="store_true", help="Include tools JSON schema in output")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -372,10 +566,12 @@ def main() -> None:
         input_dir=args.input_dir,
         output_path=args.output,
         expected_tools_path=args.expected_tools,
+        task_id_map_path=args.task_id_map,
         min_jaccard=args.min_jaccard,
         max_tokens=args.max_tokens,
         max_examples=args.max_examples,
         dry_run=args.dry_run,
+        include_tools=args.include_tools,
     )
 
     if written == 0:

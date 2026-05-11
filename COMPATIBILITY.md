@@ -44,15 +44,18 @@ domain knowledge and attention projections handle formatting/instruction.
 
 ## ZAYA XML Tool-Call Format
 
-ZAYA1-8B uses a JSON-inside-XML format via vLLM's `--tool-call-parser zaya_xml`:
+ZAYA1-8B uses a JSON-inside-XML format via vLLM's `--tool-call-parser zaya_xml`.
+Uses special tokens from the tokenizer (IDs 101-104):
 
 ```xml
-<tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>
+<zyphra_tool_call>{"name": "tool_name", "arguments": {...}}</zyphra_tool_call>
+<zyphra_tool_response>result text here</zyphra_tool_response>
 ```
 
 **Critical distinction**: This differs from Godspeed's native Qwen3-Coder XML format
 (`<function=name>`) and from OpenAI-standard `tool_calls` JSON. Training data MUST
-use the ZAYA XML format. A remapper (`scripts/remap_to_zaya.py`) converts Godspeed
+use the ZAYA XML format with the correct `<zyphra_tool_call>` / `<zyphra_tool_response>`
+tags. A remapper (`scripts/remap_to_zaya.py`) converts Godspeed
 conversation JSONL to this format with quality gates applied.
 
 The ZAYA1-8B chat template uses Qwen-style tokens:
@@ -68,12 +71,12 @@ Fix the bug in this codebase...
 Let me explore the codebase first.
 </think>
 
-<tool_call>{"name": "glob_search", "arguments": {"pattern": "**/*.py"}}</tool_call>
+<zyphra_tool_call>{"name": "glob_search", "arguments": {"pattern": "**/*.py"}}</zyphra_tool_call>
 <|im_end|>
 <|im_start|>tool
-src/main.py
+<zyphra_tool_response>src/main.py
 src/config.py
-src/models.py
+src/models.py</zyphra_tool_response>
 <|im_end|>
 ```
 
@@ -162,6 +165,48 @@ following, not domain-specific reasoning (which lives in the 1280 expert weights
 ### Training Config
 
 See `configs/lora_tool_call.yaml`.
+
+## Upstream Code Audit (Zyphra/transformers @ zaya1, Zyphra/vllm @ zaya1-pr)
+
+Audit performed May 10, 2026 against the modular source (`modular_zaya.py`) and
+the vLLM tool parser (`zaya_tool_parser.py`).
+
+### Already SOTA (no action needed)
+
+| Feature | Implementation |
+|---------|---------------|
+| `torch.compile` fallback | Dynamically switches from `torch.jit.script` to `torch.compile` for torch ≥2.2 |
+| FP8 activation storage | `fp8_input_store` option stores activations in float8 for backward pass |
+| Fused bias+SwiGLU | `BiasSwiGLUFunction` custom autograd kernel avoids intermediate materialization |
+| FP32 residual accumulation | `residual_in_fp32=True` for numerical stability in 80-layer model |
+| Residual scaling | Per-layer learnable scale+bias on hidden states and residuals (DeepNet-style) |
+| CCA attention | Depthwise+grouped conv1d QK mixing, L2-normalized QK, per-head temperatures |
+| Dual time-stream values | `val_proj1` (current) + `val_proj2` (shifted) for richer value representation |
+| EDA routing | Depth-wise averaging of router hidden states across MoE layers |
+| MOD skip expert | Mixture-of-Depths: tokens can bypass MoE computation entirely |
+| Three attention backends | `eager`, `sdpa`, `flash_attention_2` dispatch via config |
+| PEFT-aware casting | FlashAttention detects PEFT fp32 layer norms and casts back to target dtype |
+
+### Findings (potential improvements in upstream)
+
+| # | Finding | Severity | Detail |
+|---|---------|----------|--------|
+| 1 | `debug_level` dead attributes | Low | Every submodule has `self.debug_level = N`. Never read in any conditional. ~30 unused attributes per model instance. |
+| 2 | Unnecessary clone in router | Low | `router_hidden_states_next = hs[:, -S:].clone()` in `ZayaRouter.forward`. A view or `contiguous()` would avoid allocation. |
+| 3 | SequentialMLP no fused MoE | Medium | 16 experts processed with Python `for` loop. Fused MoE kernels (vLLM `fused_moe`) would be 3-5x faster for training. Acceptable since vLLM fork already has fused MoE for inference. |
+| 4 | `o_proj` dimension hardcoded | Low | `hidden_size // 2` assumed. Would break if `head_dim` or `num_attention_heads` changed from defaults (8 heads × 128 dim = 1024 = 2048/2). |
+| 5 | No aux load-balancing loss | Medium | `output_router_logits` not wired in config. During training, MoE models typically need aux loss to prevent expert collapse. LoRA SFT freezes base model so experts don't collapse. For GRPO with trainable router weights, monitor expert utilization manually. |
+| 6 | `conv_states` pre-allocation | Low | `torch.zeros(80, batch_size, 1280, 2)` for CCA cache. ~400KB — negligible. |
+
+### Impact on this experiment
+
+None of the upstream findings are blocking. The training pipeline targets only
+attention projection layers (`o_proj`, `linear_q`, `linear_k`, `val_proj1`,
+`val_proj2`) via QLoRA, leaving expert weights frozen. Expert collapse during
+SFT is not a concern. For GRPO Stage 2, expert utilization should be logged.
+
+Finding #5 (aux loss) is the most relevant — if future experiments train router
+weights, add expert utilization logging to detect collapse.
 
 ## References
 

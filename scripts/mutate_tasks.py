@@ -330,9 +330,13 @@ def mutate_tasks(
     ]
     languages = ["python", "typescript", "go", "rust"]
 
-    # Generate mutations from base tasks
+    random.seed(42)
+
     ood_target = int(target_count * ood_ratio)
-    variant_target = target_count - len(_OOD_TASKS)
+    variant_target = target_count - ood_target
+
+    if not base_tasks:
+        variant_target = 0
 
     while len(mutations) < variant_target:
         task = random.choice(base_tasks)
@@ -344,7 +348,10 @@ def mutate_tasks(
                 mutated = _compose_tasks(task, t2)
                 mutator = _compose_tasks
             else:
-                mutated = mutator(task)
+                if mutator == _language_swap:
+                    mutated = mutator(task, "python", random.choice(languages))
+                else:
+                    mutated = mutator(task)
         elif mutator == _language_swap:
             mutated = mutator(task, "python", random.choice(languages))
         else:

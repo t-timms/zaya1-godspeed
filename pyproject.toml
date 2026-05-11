@@ -5,9 +5,33 @@ description = "Completing ZAYA1-8B with agentic multi-turn tool calling via teac
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 readme = "README.md"
+dependencies = [
+    "torch>=2.5.0",
+    "accelerate>=1.0.0",
+    "transformers @ git+https://github.com/Zyphra/transformers.git@zaya1",
+    "peft>=0.13.0",
+    "bitsandbytes>=0.45.0",
+    "trl>=0.24.0",
+    "datasets>=3.0.0",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
+]
+inference = [
+    "vllm @ git+https://github.com/Zyphra/vllm.git@zaya1-pr",
+]
+speed = [
+    "unsloth>=2026.5.0",
+    "liger-kernel>=0.6.0",
+]
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
@@ -15,3 +39,6 @@ select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.report]
+omit = ["tests/*"]

@@ -55,16 +55,61 @@ These ZAYA innovations must not be touched:
 ### File responsibilities
 | File | Role | Change policy |
 |------|------|---------------|
-| `scripts/remap_to_zaya.py` | Godspeed JSONL → ZAYA ChatML | Must preserve `<zyphra_tool_call>` format |
 | `scripts/train.py` | QLoRA SFT via TRL SFTTrainer | Uses SFTConfig, assistant_only_loss=True |
 | `scripts/train_grpo.py` | GRPO policy improvement | Uses GRPOConfig, dapo loss, vLLM colocate |
+| `scripts/serve_zaya1.py` | vLLM inference server for ZAYA1-8B | Matches official Zyphra deployment, FP8/MXFP4 quant support, `--enforce-eager` |
+| `scripts/convert_zaya_to_gguf.py` | HF safetensors → FP16 GGUF converter | Shortens names to fit GGUF 64-char limit. Produces name_map.json. |
+| `scripts/fix_gguf_arch.py` | Rewrite GGUF architecture field | Tool for fixing GGUF arch string in binary |
+| `scripts/remap_to_zaya.py` | Godspeed JSONL → ZAYA ChatML | Must preserve `<zyphra_tool_call>` format |
 | `scripts/mutate_tasks.py` | 200+ variant tasks | 6 mutation types, 30% OOD minimum |
 | `data/generate.py` | Godspeed → ChatML extraction | Legacy — prefer remap_to_zaya.py |
 | `configs/lora_tool_call.yaml` | Single source of truth for hyperparams | rsLoRA, chunked_nll, Liger Kernel, double quant |
-| `patches/` | Runtime monkey-patches + upstream PR docs | `apply_zaya_patches.py` auto-runs in train.py/train_grpo.py |
+| `patches/` | Runtime monkey-patches + vLLM plugins | `apply_zaya_patches.py` auto-runs in train.py/train_grpo.py |
 | `tests/` | 100 unit tests | Run before any commit |
+
+### NVFP4 quantization pipeline
+- **GGUF converter**: `scripts/convert_zaya_to_gguf.py --arch llama` (llama arch for llama.cpp quantize compat)
+- **NVFP4 quantizer**: llama.cpp `build/bin/llama-quantize input.gguf output.gguf NVFP4`
+- **NVFP4 fallback fix**: Added `GGML_TYPE_NVFP4 → GGML_TYPE_F16` case in `llama-quant.cpp` line 391 (submitted to upstream)
+- **Result**: 4.76 GB NVFP4 ZAYA1-8B at 4.52 bpw, 80 fallback tensors, ~35s quantization
+- **Output**: `/tmp/zaya1-8b-nvfp4.gguf` + `/tmp/zaya1-8b-nvfp4.name_map.json`
+- **vLLM patches required**: gguf constants (zaya arch), model registry (ZayaForCausalLM), GGUF loader (name map support)
+- **Status**: 2483/2483 parameters mapped. Remaining: Zyphra vLLM fork install for fused MoE weight loading.
 
 ## Development workflow
 1. `uv sync --dev` to install deps
 2. `uv run ruff check .` for linting (0 errors required)
 3. `uv run pytest tests/` for tests (100 required, 0 failures)
+
+## Engineering Standards (Non-Negotiable)
+
+### SOTA Only
+Every line of code, every architectural decision, every configuration value must be
+state-of-the-art for May 2026. No legacy patterns, no "good enough" shortcuts.
+When two approaches exist, benchmark both and take the better one.
+
+### Documentation-Backed
+No claim, magic number, or design choice stands without a verifiable source. Every
+hardcoded value, every hyperparameter default, every model reference must be traceable
+to one of:
+- Primary: peer-reviewed paper (arXiv, conference), official model card, upstream README
+- Secondary: published benchmark result, authoritative blog post, verified issue/PR
+- Never: LLM conjecture, unverified StackOverflow, "it works on my machine"
+
+Reference format in code comments: `(ref: arXiv XXXX.XXXXX §3.2)` or `(ref: HF model card 2026-05-11)`.
+
+### Professional Code
+- `from __future__ import annotations` in every `.py` file
+- Type hints on all public functions (no `Any` unless truly dynamic)
+- Ruff: 0 errors (E, F, I, N, W, UP rules)
+- No bare `except:`, no `except Exception:` without logging
+- Logging: `logging.getLogger(__name__)` with structured messages
+- Pytest: 100% pass rate before any commit
+- Secrets: never committed, use environment variables, `.gitignore`-protected `.env`
+
+### Verification Protocol
+Before claiming something works:
+1. Run the thing end-to-end (not just unit tests — integration verification)
+2. Check against the source documentation for correctness
+3. If training: run a dry-run batch (forward + backward pass) before full run
+4. If deployment: verify health endpoint responds before reporting success

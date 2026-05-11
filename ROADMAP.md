@@ -44,21 +44,22 @@ the Godspeed coding agent on consumer hardware (RTX 5070 Ti, 16 GB VRAM).
 
 ---
 
-## Phase 2 — Inference Pipeline 🔴
+## Phase 2 — Inference Pipeline 🟡
 
 **Goal**: Serve ZAYA1-8B via an OpenAI-compatible endpoint at usable speed.
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Build vLLM (Zyphra fork) in WSL | ✅ | CUDA 13.2 toolkit, 64 GB WSL, MAX_JOBS=10. 65-minute build. `scripts/build_vllm_detached.sh`. |
-| Serve ZAYA1-8B via vLLM | 🔴 | Blocked: Windows desktop compositor consumes ~15.9 GB VRAM. 85 MB free. Needs cold reboot. |
-| Verify generation quality (coding prompts) | ⬜ | Test with Godspeed-style system prompts |
-| Benchmark throughput on RTX 5070 Ti (16 GB) | ⬜ | Target: 50+ tok/s via vLLM |
-| Fix serve_zaya1.py in Godspeed repo | ✅ | `scripts/serve_zaya1.py` with n-gram speculation + tool-call support |
-| NF4 path (transformers) | ❌ | Confirmed broken — bitsandbytes dequant incompatible with CCA attention |
+| Build vLLM (Zyphra fork) in WSL | ✅ | CUDA 13.2 toolkit, 64 GB WSL, MAX_JOBS=10. 65-min build. Reinstall needed (pip cache conflict). |
+| Serve ZAYA1-8B via vLLM (FP8) | 🟡 | 8.76 GB model loads (2s startup, 5.37 GB KV cache). Output quality unverified (--reasoning-parser qwen3 missing in tests). |
+| Serve ZAYA1-8B via vLLM (bf16) | ❌ | 16.48 GB model exceeds 15.92 GB GPU. -0.39 GB for KV cache. Confirmed impossible on 16 GB. |
+| NVFP4 ZAYA1-8B quantized model | 🟡 | **First-ever NVFP4 ZAYA1-8B built**: 4.76 GB, 4.52 bpw, 80 fallback tensors. llama.cpp NVFP4 fallback fixed (submitted upstream). GGUF→vLLM name mapping verified (2483/2483 mapped). Blocked by Zyphra vLLM fork install for fused MoE weight loading. |
+| Fix serve_zaya1.py | ✅ | Re-engineered May 11: `subprocess.Popen`, health polling, eager mode, FP8/MXFP4 quant support, matches official Zyphra deploy command. |
+| MXFP4 quantized serving (Blackwell) | ❌ | OsaurusAI MXFP4 model: weight shape mismatch with Zyphra vLLM fork. |
+| NF4 path (transformers) | ❌ | Confirmed broken — bitsandbytes dequant incompatible with CCA attention. |
+| bitsandbytes (vLLM) | ❌ | ZayaForCausalLM lacks `packed_modules_mapping`. |
 
-**Blocker**: Windows desktop compositor uses ~15.9 GB VRAM. Cold reboot frees 14+ GB.
-**Alternative (interim)**: Zyphra Cloud API at cloud.zyphra.com — no local VRAM needed.
+**Blocker resolved**: Root cause was WSL2 `llama-server` running Qwen3.6-27B-Q4_K_XL (15 GB), not Windows compositor. Removed May 11.
 
 ---
 

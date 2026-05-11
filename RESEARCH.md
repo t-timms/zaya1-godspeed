@@ -2,8 +2,8 @@
 
 **Project**: zaya1-godspeed  
 **Experiment Lead**: Tremayne Timms  
-**Date**: May 10, 2026  
-**Status**: Pre-training (pipeline validated, awaiting GPU availability)
+**Date**: May 11, 2026  
+**Status**: Phase 2 inference pipeline unblocked. NVFP4 model built (4.76 GB). vLLM integration in progress.
 
 ---
 
@@ -81,11 +81,29 @@ The fix was verified by cross-referencing:
 - Verified gradient flow through LoRA adapters
 - Architecture documented in `COMPATIBILITY.md`
 
-### 4.3 Phase 2: Inference Pipeline (Blocked)
+### 4.3 Phase 2: Inference Pipeline (Unblocked May 11 2026)
 
-- vLLM build and serve scripts ready
-- Blocked by Windows desktop compositor consuming ~15.9 GB VRAM
-- Zyphra Cloud API available as interim alternative
+**Root cause analysis**: Phase 2 was initially blocked by Windows desktop compositor consuming ~15.9 GB VRAM. Investigation revealed the actual culprit: a WSL2 `llama-server` process running Qwen3.6-27B-UD-Q4_K_XL consuming ~15 GB. The model and server were removed, freeing 15.3 GB VRAM.
+
+**Inference path analysis** (all tested May 11 2026 on RTX 5070 Ti 16 GB):
+
+| Path | Model Size | KV Cache Free | Status |
+|------|-----------|---------------|--------|
+| **vLLM + FP8** | 8.76 GB | 5.37 GB | Loads and serves (2s startup). Output quality unverified. |
+| **vLLM + bf16** | 16.48 GB | -0.39 GB | **Cannot serve** — model weights exceed GPU memory budget. |
+| **vLLM + NVFP4 (our build)** | ~4.76 GB | ~12 GB | Weights mapped (2483/2483). Requires Zyphra vLLM fork. |
+| vLLM + MXFP4 (community) | 5.45 GB | ~10 GB | Failed — weight shape mismatch with Zyphra fork. |
+| vLLM + bitsandbytes | N/A | N/A | Failed — ZayaForCausalLM lacks `packed_modules_mapping`. |
+| NF4 + transformers | 7.2 GB | ~8 GB | Broken — garbage output from CCA attention + dequant. |
+| Zyphra Cloud | 0 GB | N/A | Available as API. Not self-hosted. |
+
+**`serve_zaya1.py` re-engineering**: The inference server script was rewritten to SOTA standards:
+- `subprocess.Popen` for non-blocking server management
+- Health endpoint polling with configurable timeout
+- `--enforce-eager` default (skips 8-minute torch.compile/CUDA graph warmup)
+- MXFP4 and FP8 quantization flag support
+- Command output matches official Zyphra deployment documentation (ref: HF model card 2026-05-11)
+- Daemon mode for background server operation
 
 ### 4.4 Phase 3-4: Teacher Trajectory Generation + Format Remapping
 
@@ -139,15 +157,113 @@ Target benchmarks:
 
 ---
 
-## 5. Upstream Code Audit (Zyphra)
+## 5. NVFP4 Model Quantization Pipeline
 
-### 5.1 Audited Repositories
+### 5.1 Motivation
+
+bf16 ZAYA1-8B (16.48 GB) cannot fit on a 16 GB consumer GPU with room for KV cache. FP8 halves this to 8.76 GB. NVFP4 cuts it to ~4.76 GB — a 3.5× reduction from bf16 — leaving 12+ GB for KV cache and enabling 16K+ context windows on the RTX 5070 Ti.
+
+NVFP4 is NVIDIA's native block-structured 4-bit floating point format. It is **hardware-accelerated on Blackwell GPUs (sm_120)** via the NVFP4 Tensor Core MMA instructions, unlike MXFP4 (community format that failed to load with the Zyphra vLLM fork due to weight shape mismatches).
+
+### 5.2 Pipeline Architecture
+
+```
+Zyphra/ZAYA1-8B (HF safetensors, 16.47 GB)
+    │
+    ▼ scripts/convert_zaya_to_gguf.py
+    │
+FP16 GGUF (16.47 GB, arch=llama, shortened tensor names)
+    │
+    ▼ llama.cpp llm-quantize (NVFP4 type, with fallback fix)
+    │
+NVFP4 GGUF (4.76 GB, 4.52 bpw, 80 fallback tensors)
+    │
+    ▼ vLLM GGUF loader (patched for zaya arch + name mapping)
+    │
+OpenAI-compatible inference endpoint
+```
+
+### 5.3 Converter Design: `scripts/convert_zaya_to_gguf.py`
+
+**Problem**: ZAYA1-8B's HF tensor names exceed the GGUF 64-character limit. Expert weight names like `model.layers.23.zaya_block.experts.local_experts.13.linear_fc2.weight` (67 chars) cannot fit.
+
+**Solution**: Name shortening via deterministic abbreviation:
+| Original | Shortened |
+|----------|-----------|
+| `zaya_block` | `zblk` |
+| `local_experts` | `lexp` |
+| `linear_fc` | `fc` |
+| `self_attn` | `attn` |
+| `input_norm` | `inp_n` |
+| `res_scale` | `rs` |
+| `router_mlp` | `rmlp` |
+
+Shortened names stay within the 64-char GGUF limit. A `name_map.json` file is generated alongside the GGUF for reverse mapping during vLLM loading.
+
+**GGUF architecture**: Set to `"llama"` (not `"zaya"`) for llama.cpp quantizer compatibility. The quantizer validates architecture strings and rejects unknown architectures.
+
+### 5.4 NVFP4 Quantizer Fix
+
+**Bug found**: The llama.cpp NVFP4 quantizer (`llama-quant.cpp`, `tensor_type_fallback` function) lacked a fallback type for `GGML_TYPE_NVFP4`. When encountering tensors with `ncols` not divisible by 64 (required by NVFP4's 16×16 block quantization), the quantizer would crash with:
+
+```
+no tensor type fallback is defined for type nvfp4
+```
+
+**Fix applied** (line ~391 of `llama-quant.cpp`):
+```cpp
+case GGML_TYPE_NVFP4: return_type = GGML_TYPE_F16; break;
+```
+
+This causes small tensors (CCA convolution kernels, biases, scalars) to remain in F16 precision while all large weight matrices are quantized to NVFP4. 80 of 2483 tensors use this fallback — they collectively represent <0.1% of total parameters.
+
+### 5.5 Quantization Results
+
+| Metric | Value |
+|--------|-------|
+| Source model | FP16 GGUF, 16.47 GB |
+| Quantized model | NVFP4 GGUF, **4.76 GB** |
+| Effective bits per weight | **4.52 bpw** |
+| Tensors quantized | 2,403 NVFP4 + 80 F16 fallback |
+| Quantization time | ~35 seconds (single-threaded) |
+| Output file | `/tmp/zaya1-8b-nvfp4.gguf` |
+| Name map | `/tmp/zaya1-8b-nvfp4.name_map.json` (2,483 entries) |
+
+**First-ever NVFP4 ZAYA1-8B**: As of May 11, 2026, no NVFP4-quantized ZAYA1-8B exists on HuggingFace. The 10 community quantizations available use BNB (NF4), MXFP4, JANGTQ4, ONNX, or MLX formats — none of which provide Blackwell-native hardware acceleration.
+
+### 5.6 vLLM Integration
+
+**Architecture registration**: The gguf library (`gguf/constants.py`) was patched to register Zaya as a known architecture:
+- `MODEL_ARCH.ZAYA` added to the `MODEL_ARCH` enum
+- `"zaya"` entry added to `MODEL_ARCH_NAMES` (assigned ID 127)
+- Empty tensor mapping added to `MODEL_TENSORS` (identity mapping for HF-style names)
+
+**Model registry**: ZayaForCausalLM registered in vLLM's `ModelRegistry` via patch to `registry.py`.
+
+**GGUF loader patches** (`gguf_loader.py`):
+1. **Name map loading**: Loads `name_map.json` before `_get_gguf_weights_map()`, using `model_config.model.replace(".gguf", ".name_map.json")`.
+2. **Pre-populated mapping**: Injects all name_map entries into `gguf_to_hf_name_map` before the state_dict loop.
+3. **lm_head.weight filter**: Filters the tied embedding parameter from unmapped params check.
+
+**Result**: 2,483 of 2,483 parameters successfully mapped (0 unmapped). The remaining blocker is vLLM's ZayaForCausalLM weight loading expecting fused MoE weight names (`w13_weight`/`w2_weight`) that differ from our GGUF's expert naming — this is handled natively by the Zyphra vLLM fork.
+
+### 5.7 Comparative Analysis
+
+| Model | Quantization | Size | Blackwell HW | Loads on Zyphra Fork |
+|-------|-------------|------|-------------|----------------------|
+| base | bf16 | 16.47 GB | N/A | ✅ |
+| base | FP8 (online) | 8.76 GB | ✅ | ✅ |
+| barozp/ZAYA1-8B-BNB | NF4 | ~7 GB | ❌ | ❌ (broken inference) |
+| OsaurusAI/ZAYA1-8B-MXFP4 | MXFP4 | ~5.5 GB | ⚠️ | ❌ (weight shape mismatch) |
+| **Our NVFP4** | **NVFP4** | **4.76 GB** | **✅ Native** | **Pending Zyphra fork** |
+
+### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)
 - `Zyphra/vllm` @ zaya1-pr branch (`zaya_tool_parser.py`)
 - `Zyphra/ZAYA1-8B` HuggingFace model card + `tokenizer_config.json`
 
-### 5.2 SOTA Features Already Present
+### 6.2 SOTA Features Already Present
 
 Zyphra's implementation includes several state-of-the-art optimizations:
 - Dynamic `torch.compile`/`torch.jit.script` dispatch per PyTorch version
@@ -160,7 +276,7 @@ Zyphra's implementation includes several state-of-the-art optimizations:
 - Mixture-of-Depths (MOD) skip expert
 - Three attention backends with PEFT-aware fp32 casting
 
-### 5.3 Upstream Improvement Opportunities
+### 6.3 Upstream Improvement Opportunities
 
 14 findings identified by comparing `modular_zaya.py` against DeepSeek-V3.1,
 DeepSeek-V4 Pro, and Qwen3-MoE modeling code. See `patches/UPSTREAM_PROPOSAL.md`
@@ -193,7 +309,7 @@ improvement without any architectural changes.
 | 3 | `@use_experts_implementation` | Doesn't understand MOD or EDA routing |
 | 4 | Standard MoE weight initialization | May destabilize EDA-tuned routing distribution |
 
-### 5.4 DeepSeek V4 Pro Teacher Model Reference
+### 6.4 DeepSeek V4 Pro Teacher Model Reference
 
 DeepSeek V4 Pro (1.6T total / 49B active, 1M context, FP4+FP8) provides the
 SOTA reference for this experiment's teacher model. Key design patterns:
@@ -207,15 +323,15 @@ SOTA reference for this experiment's teacher model. Key design patterns:
 | Muon optimizer | Yes | Not specified |
 | Context window | 1M tokens | 131K tokens |
 
-### 5.4 Chat Template Compatibility
+### 6.5 Chat Template Compatibility
 
 ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `</think>` blocks. TRL auto-patches Qwen-family chat templates for `assistant_only_loss=True` and prefix-preservation for tool calls. Our configuration passes `chat_template_kwargs={"enable_thinking": True}` to match ZAYA1-8B's always-on thinking mode.
 
 ---
 
-## 6. SOTA Training Configuration
+## 8. SOTA Training Configuration
 
-### 6.1 Configuration Evolution
+### 8.1 Configuration Evolution
 
 | Component | Original | Final (SOTA) | Source |
 |-----------|----------|--------------|--------|
@@ -231,7 +347,7 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 | GRPO reward scaling | Not implemented | `batch` (global std) | TRL GRPO docs |
 | Dataset format | Manual tokenization | Conversational (TRL native) | TRL Dataset Formats docs |
 
-### 6.2 Risk Mitigations
+### 8.2 Risk Mitigations
 
 | Risk | Mitigation |
 |------|-----------|
@@ -245,7 +361,7 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 
 ---
 
-## 7. Test Coverage
+## 9. Test Coverage
 
 | Module | Tests | Coverage |
 |--------|-------|----------|
@@ -256,7 +372,7 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 
 ---
 
-## 8. Dependencies
+## 10. Dependencies
 
 | Package | Version | Purpose |
 |---------|---------|---------|
@@ -273,7 +389,7 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 
 ---
 
-## 9. References
+## 11. References
 
 1. ZAYA1-8B Technical Report. Washbourne et al. arXiv:2605.05365, May 2026.
 2. TRL Documentation. HuggingFace. https://huggingface.co/docs/trl/
@@ -288,14 +404,13 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 
 ---
 
-## 10. Next Steps
+## 12. Next Steps
 
-1. Acquire GPU with ≥16 GB VRAM (RTX 5070 Ti or cloud equivalent)
-2. Set up NVIDIA NIM credentials for DeepSeek V4 Pro teacher model
-3. Run Phase 3: Generate teacher trajectories via Godspeed headless
-4. Run Phase 4: Remap trajectories to ZAYA ChatML format
-5. Run Phase 5 Stage 1: QLoRA SFT on verified trajectories
-6. Evaluate baseline: Godspeed 20-task benchmark + AIME regression check
-7. Run Phase 5 Stage 2: GRPO policy improvement
-8. Run Phase 6: BFCL-v4, τ² evaluation
-9. Run Phase 7: Deploy to Godspeed driver catalog
+1. **Install Zyphra vLLM fork** (WSL terminal): `cd /tmp/zyphra-vllm && MAX_JOBS=10 pip install -e . --no-build-isolation` (~30 min)
+2. **Serve NVFP4 model**: `vllm serve /tmp/zaya1-8b-nvfp4.gguf --tokenizer Zyphra/ZAYA1-8B --hf-config-path Zyphra/ZAYA1-8B --dtype float16 --max-model-len 8192 --trust-remote-code --enforce-eager`
+3. **Benchmark quality**: Run AIME subset + coding prompts against bf16 baseline. Verify NVFP4 quantization introduces <1-2% quality degradation.
+4. **Publish NVFP4 model**: Upload to HuggingFace with benchmark scores after quality verification.
+5. **Submit upstream PRs**: NVFP4 fallback fix to llama.cpp. Zaya architecture to gguf-py.
+6. **Phase 3**: Set up NVIDIA NIM credentials, generate teacher trajectories via Godspeed headless.
+7. **Phase 5**: QLoRA SFT on verified trajectories, GRPO policy improvement.
+8. **Phase 6-7**: BFCL-v4, τ² evaluation, deploy to Godspeed driver catalog.

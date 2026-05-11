@@ -107,9 +107,11 @@ fine-tuning stage. The fine-tuning task is distribution extension, not cold star
 
 | Path | Status | Speed | Notes |
 |------|--------|-------|-------|
-| **vLLM (Zyphra fork)** | Required | 50+ tok/s | Recommended by Zyphra. Supports `--tool-call-parser zaya_xml`. |
+| **vLLM (Zyphra fork), FP8** | 🟡 Experimental | ~4 tok/s (1st req, JIT) | 8.76 GB model. Tested May 11: loads and serves, output quality **unverified**. Needs `--reasoning-parser qwen3`. First request slow (Triton JIT), subsequent should be faster. |
+| **vLLM (Zyphra fork), bf16** | ❌ OOM | N/A | 16.48 GB model exceeds 15.92 GB GPU. No room for KV cache. |
 | **NF4 + transformers** | ❌ Broken | 3 tok/s | Garbage output. Bitsandbytes NF4 dequant incompatible with Zaya CCA attention. |
 | **GGUF / llama.cpp** | ❌ Blocked | N/A | Zaya architecture not supported ([llama.cpp#22776](https://github.com/ggml-org/llama.cpp/issues/22776)). |
+| **NVFP4 (llama.cpp quantizer)** | ⬜ Planned | TBD | Our own 4 GB quantized model on Blackwell sm_120. See `ROADMAP.md`. |
 | **Zyphra Cloud** | Available | API latency | Serverless endpoint at cloud.zyphra.com. Needs API key. |
 
 ### vLLM deployment
@@ -122,8 +124,13 @@ vllm serve Zyphra/ZAYA1-8B --port 8010 \
     --tool-call-parser zaya_xml \
     --max-num-seqs 2 --max-model-len 48000
 
-# 16 GB cards (use serve_zaya1.py)
-python scripts/serve_zaya1.py --max-model-len 24000 --max-num-seqs 2
+# 16 GB cards — FP8 quantization (8.76 GB model, 5.37 GB KV cache)
+vllm serve Zyphra/ZAYA1-8B --port 8010 \
+    --quantization fp8 --dtype bfloat16 \
+    --reasoning-parser qwen3 --enable-auto-tool-choice \
+    --tool-call-parser zaya_xml \
+    --max-num-seqs 1 --max-model-len 4096 \
+    --trust-remote-code --enforce-eager
 ```
 
 Requires the Zyphra vLLM fork built in WSL (see `scripts/build_vllm_detached.sh`).

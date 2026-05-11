@@ -129,6 +129,10 @@ def main() -> None:
 
     check_vram()
 
+    from patches.apply_zaya_patches import apply_all_patches
+
+    apply_all_patches()
+
     from datasets import Dataset
     from trl import GRPOConfig, GRPOTrainer
 

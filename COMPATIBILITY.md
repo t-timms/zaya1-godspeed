@@ -189,24 +189,98 @@ the vLLM tool parser (`zaya_tool_parser.py`).
 
 ### Findings (potential improvements in upstream)
 
-| # | Finding | Severity | Detail |
-|---|---------|----------|--------|
-| 1 | `debug_level` dead attributes | Low | Every submodule has `self.debug_level = N`. Never read in any conditional. ~30 unused attributes per model instance. |
-| 2 | Unnecessary clone in router | Low | `router_hidden_states_next = hs[:, -S:].clone()` in `ZayaRouter.forward`. A view or `contiguous()` would avoid allocation. |
-| 3 | SequentialMLP no fused MoE | Medium | 16 experts processed with Python `for` loop. Fused MoE kernels (vLLM `fused_moe`) would be 3-5x faster for training. Acceptable since vLLM fork already has fused MoE for inference. |
-| 4 | `o_proj` dimension hardcoded | Low | `hidden_size // 2` assumed. Would break if `head_dim` or `num_attention_heads` changed from defaults (8 heads × 128 dim = 1024 = 2048/2). |
-| 5 | No aux load-balancing loss | Medium | `output_router_logits` not wired in config. During training, MoE models typically need aux loss to prevent expert collapse. LoRA SFT freezes base model so experts don't collapse. For GRPO with trainable router weights, monitor expert utilization manually. |
-| 6 | `conv_states` pre-allocation | Low | `torch.zeros(80, batch_size, 1280, 2)` for CCA cache. ~400KB — negligible. |
+Compared against DeepSeek-V4 Pro (May 2026, 1.6T/49B MoE, 1M ctx), DeepSeek-V3.1
+(`modeling_deepseek_v3.py`), and Qwen3-MoE (`modular_qwen3_moe.py`).
+
+#### DeepSeek-V4 Pro SOTA Reference (Teacher Model)
+
+| Property | DeepSeek V4 Pro | ZAYA1-8B |
+|----------|----------------|----------|
+| Total params | 1.6T | 8.4B |
+| Active params | 49B | 760M |
+| Context window | 1,000,000 | 131,072 |
+| Precision | FP4+FP8 mixed | BF16 |
+| Attention | CSA + HCA hybrid | CCA |
+| Connections | mHC (manifold-constrained) | Residual scaling |
+| Optimizer | Muon | Not specified |
+| Post-training | On-policy distillation | 4-stage RL cascade |
+| SWE Verified | 80.6% | N/A (BFCL-v4: 39.22) |
+| Reasoning modes | Non-think / High / Max | Always-on thinking |
+
+| # | Finding | Severity | Present in DeepSeek-V3 | Present in Qwen3-MoE |
+|---|---------|----------|----------------------|---------------------|
+| 1 | **No `output_router_logits` / aux loss** | **High** | Yes | Yes |
+| 2 | **`SequentialMLP` not fused MoE** | **High** | Uses 3D `nn.Parameter` | Uses 3D `nn.Parameter` |
+| 3 | **No `GradientCheckpointingLayer`** | Medium | Yes | Yes |
+| 4 | **No `_can_compile_fullgraph = True`** | Medium | Yes | Yes |
+| 5 | **No `_can_record_outputs`** | Medium | Yes | Yes |
+| 6 | **No `logits_to_keep` support** | Medium | Yes | Yes |
+| 7 | **No `@use_kernel_func_from_hub` for RoPE** | Low | Yes | Yes |
+| 8 | **No `@use_experts_implementation`** | Medium | Yes | Yes |
+| 9 | **No `_tied_weights_keys` class attribute** | Low | Yes | Yes |
+| 10 | **No `_tp_plan` / `_pp_plan`** | Low | Yes | Yes |
+| 11 | **No `_init_weights` override for MoE** | Medium | Yes | Yes |
+| 12 | **No `_supports_flex_attn = True`** | Low | Yes | Yes |
+| 13 | **Custom RMSNorm not hub-loaded** | Low | Yes | Yes |
+| 14 | **`ZayaDecoderATTLayer` extends `nn.Module` not `GradientCheckpointingLayer`** | Medium | Yes | Yes |
+
+#### Detailed gap analysis
+
+**#1: Missing MoE aux loss (HIGH impact)**
+
+ZayaConfig lacks `output_router_logits` and `router_aux_loss_coef`. ZayaForCausalLM does not compute
+`load_balancing_loss_func()`. Both DeepSeek-V3 and Qwen3-MoE compute auxiliary loss to prevent
+expert collapse. Without this, training (especially GRPO) cannot monitor or penalize routing imbalance.
+The ZayaRouter computes logits internally but never exposes them to the model output.
+
+**#2: SequentialMLP vs fused 3D expert weights (HIGH impact)**
+
+ZAYA uses `SequentialMLP(nn.ModuleList([MLP, MLP, ...]))` — each expert is a separate `nn.Module`
+processed in a Python `for` loop. DeepSeek-V3 and Qwen3-MoE store expert weights as fused 3D
+`nn.Parameter` tensors (`gate_up_proj: [num_experts, 2*intermediate, hidden]`). The 3D approach:
+- Uses `F.linear()` instead of `nn.Linear()` per expert (avoids Module overhead)
+- Is compatible with `@use_experts_implementation` which dispatches to fused MoE kernels
+- Reduces memory fragmentation from 16 separate Linear modules
+- Enables vLLM fused MoE inference
+
+**#3-5: Training infrastructure gaps (MEDIUM impact)**
+
+Missing `GradientCheckpointingLayer` (DeepSeek/Qwen3 use this), `_can_compile_fullgraph` (enables
+`torch.compile` full model graph), and `_can_record_outputs` (enables TRL trainer to capture router
+logits for aux loss). ZayaDecoderATTLayer extends `nn.Module` directly.
+
+**#6: Missing `logits_to_keep` (MEDIUM impact)**
+
+During training, computing logits for the full sequence is wasteful. DeepSeek-V3 and Qwen3-MoE
+support `logits_to_keep` to compute only the last N token logits.
+
+**#11: Missing MoE weight initialization (MEDIUM impact)**
+
+ZAYA relies on default PyTorch `Linear` init for router and expert weights. DeepSeek-V3 explicitly
+initializes `DeepseekV3TopkRouter.weight` with `normal_(std=initializer_range)` and
+`e_score_correction_bias` to zeros. Qwen3-MoE does the same for `Qwen3MoeTopKRouter.weight`
+and `Qwen3MoeExperts.gate_up_proj/down_proj`.
 
 ### Impact on this experiment
 
-None of the upstream findings are blocking. The training pipeline targets only
-attention projection layers (`o_proj`, `linear_q`, `linear_k`, `val_proj1`,
-`val_proj2`) via QLoRA, leaving expert weights frozen. Expert collapse during
-SFT is not a concern. For GRPO Stage 2, expert utilization should be logged.
+**Finding #1 (aux loss)** is the most impactful for training. During QLoRA SFT, the base model
+(including expert weights) is frozen, so expert collapse is not a concern. However, for GRPO
+Stage 2, if router-related weights become trainable, expert utilization should be
+logged manually since the model cannot compute aux loss.
 
-Finding #5 (aux loss) is the most relevant — if future experiments train router
-weights, add expert utilization logging to detect collapse.
+**Finding #2 (fused MoE)** affects training throughput but not correctness. The vLLM Zyphra
+fork already includes fused MoE for inference. Training-time fused MoE is not available
+in the transformers fork (same limitation as DeepSeek-V3 naive experts in HF transformers).
+
+**DeepSeek V4 Pro as teacher**: The teacher model vastly exceeds ZAYA1-8B (49B vs 760M
+active params, 1M vs 131K context, FP4+FP8 vs BF16). Key design patterns that ZAYA's
+next iteration could adopt from DeepSeek V4 Pro:
+- **Manifold-constrained hyper-connections (mHC)**: More stable signal propagation than
+  ZAYA's residual scaling for very deep models
+- **On-policy distillation**: Independent domain expert SFT → unified consolidation,
+  potentially superior to ZAYA's 4-stage sequential RL cascade for multi-domain tasks
+- **Muon optimizer**: Faster convergence and training stability vs standard AdamW
+- **Hybrid CSA+HCA attention**: More efficient long-context attention than CCA alone
 
 ## References
 

@@ -2,8 +2,8 @@
 
 **Project**: zaya1-godspeed  
 **Experiment Lead**: Tremayne Timms  
-**Date**: May 11, 2026  
-**Status**: Phase 2 inference pipeline unblocked. NVFP4 model built (4.76 GB). vLLM integration in progress.
+**Date**: May 12, 2026  
+**Status**: Phase 2 majority complete. NVFP4 GGUF built (4.76 GB, first-ever). vLLM serves original model (8.76 GB FP8). Compressed-tensors NVFP4 pipeline selected. Two-stage plan: Marlin FP4 (Stage 1, 6-9 hrs) → Custom Blackwell CUDA kernel (Stage 2, 24-37 hrs).
 
 ---
 
@@ -247,15 +247,46 @@ This causes small tensors (CCA convolution kernels, biases, scalars) to remain i
 
 **Result**: 2,483 of 2,483 parameters successfully mapped (0 unmapped). The remaining blocker is vLLM's ZayaForCausalLM weight loading expecting fused MoE weight names (`w13_weight`/`w2_weight`) that differ from our GGUF's expert naming — this is handled natively by the Zyphra vLLM fork.
 
-### 5.7 Comparative Analysis
+### 5.7 NVFP4 Serving Architecture (May 12, 2026)
+
+**Original GGUF path blocked**: vLLM's GGUF handler lacks NVFP4 tensor type support. Five separate patches applied (model registry, CCA state shape/dtype, FusedMoE GGUF per-expert materialization, zaya.py GGUF routing, GGUF single-shard materialization). Custom loader achieved 803/2483 weights at 1.04 GB before hitting MoE routing + GGUFUninitializedParameter materialization issues with remaining 1440+ expert weights.
+
+**Four paths evaluated**:
+
+| Path | VRAM | Kernel | Hours | Status |
+|------|------|--------|-------|--------|
+| GGUF → vLLM GGUF handler | — | Python dequant | — | Blocked (MoE routing) |
+| GGUF → Compressed-tensors | 4-5 GB | Marlin FP4 | 9-14 | Viable |
+| Original → Compressed-tensors | 4-5 GB | Marlin FP4 | 6-9 | **Stage 1** |
+| Custom Blackwell CUDA kernel | 4-5 GB | NVFP4 Tensor Core | 24-37 | **Stage 2** |
+
+**Decision: Two-stage pipeline**:
+1. **Stage 1** (6-9 hrs): Quantize original BF16 → compressed-tensors NVFP4 via `CompressedTensorsW4A16Fp4` (Marlin FP4 kernel). Publish first NVFP4 ZAYA1-8B benchmark. ~6.2 GB VRAM.
+2. **Stage 2** (24-37 hrs): Write custom Blackwell NVFP4 Tensor Core CUDA dequant kernel as drop-in Marlin replacement. ~4-5 GB VRAM, sm_120 hardware-accelerated. Reusable across all models, open-source contribution to vLLM.
+
+**Rationale**: Benchmark quality is identical between Stage 1 and Stage 2 (NVFP4 → FP16 dequant is deterministic math). Stage 1 gets us first-to-publish. Stage 2 demonstrates Blackwell GPU architecture expertise — deeper technical achievement with broader impact.
+
+**Technical findings from GGUF path investigation**:
+- `nvcc` at `/usr/local/cuda/bin/nvcc` (CUDA 13.2) must be in PATH for any vLLM CUDA builds
+- Zyphra vLLM fork Python files (cca.py, cca_attn.py, zaya.py, zaya_tool_parser.py, zaya_config.py) can be overlaid on stock vLLM 0.20.2 (no CUDA kernel rebuild needed)
+- `CompressedTensorsW4A16Fp4` uses Marlin FP4 kernel (get_min_capability=75, Turing+), NOT Blackwell-specific NVFP4 Tensor Cores
+- lainlives/ZAYA1-8B-GGUF is empty (0 files, 0 bytes) — our NVFP4 GGUF is genuinely the first
+- llama.cpp has no Zaya architecture support (no model implementation, no converter entry)
+- CCA attention requires GPU; CPU offloading breaks CCA kernels, producing garbage output
+- `GGUFLinearMethod._create_padded_weight_param` only materializes when `len(data_container) > 1` (multi-shard); single-shard params remain uninitialized without patching
+
+### 5.8 Comparative Analysis
 
 | Model | Quantization | Size | Blackwell HW | Loads on Zyphra Fork |
 |-------|-------------|------|-------------|----------------------|
 | base | bf16 | 16.47 GB | N/A | ✅ |
-| base | FP8 (online) | 8.76 GB | ✅ | ✅ |
+| base | FP8 (online) | 8.76 GB | ✅ | ✅ (stock vLLM 0.20.2 + 5 Python file overlay) |
 | barozp/ZAYA1-8B-BNB | NF4 | ~7 GB | ❌ | ❌ (broken inference) |
 | OsaurusAI/ZAYA1-8B-MXFP4 | MXFP4 | ~5.5 GB | ⚠️ | ❌ (weight shape mismatch) |
-| **Our NVFP4** | **NVFP4** | **4.76 GB** | **✅ Native** | **Pending Zyphra fork** |
+| lainlives/ZAYA1-8B-GGUF | Q4_K/Q8_0 | N/A | ❌ | ❌ (empty repo, 0 files uploaded) |
+| **Our NVFP4 GGUF** | **NVFP4** | **4.76 GB** | **✅ Native** | **GGUF handler incompatible** |
+| **Our NVFP4 CT (Stage 1)** | **NVFP4** | **~4.5 GB disk** | ⚠️ (Marlin, not MMA) | **Planned** |
+| **Our NVFP4 CUDA (Stage 2)** | **NVFP4** | **~4.5 GB disk** | **✅ Tensor Core MMA** | **Planned** |
 
 ### 6.1 Audited Repositories
 
@@ -404,13 +435,23 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 
 ---
 
-## 12. Next Steps
+## 12. Next Steps (Updated May 12, 2026)
 
-1. **Install Zyphra vLLM fork** (WSL terminal): `cd /tmp/zyphra-vllm && MAX_JOBS=10 pip install -e . --no-build-isolation` (~30 min)
-2. **Serve NVFP4 model**: `vllm serve /tmp/zaya1-8b-nvfp4.gguf --tokenizer Zyphra/ZAYA1-8B --hf-config-path Zyphra/ZAYA1-8B --dtype float16 --max-model-len 8192 --trust-remote-code --enforce-eager`
-3. **Benchmark quality**: Run AIME subset + coding prompts against bf16 baseline. Verify NVFP4 quantization introduces <1-2% quality degradation.
-4. **Publish NVFP4 model**: Upload to HuggingFace with benchmark scores after quality verification.
-5. **Submit upstream PRs**: NVFP4 fallback fix to llama.cpp. Zaya architecture to gguf-py.
-6. **Phase 3**: Set up NVIDIA NIM credentials, generate teacher trajectories via Godspeed headless.
-7. **Phase 5**: QLoRA SFT on verified trajectories, GRPO policy improvement.
-8. **Phase 6-7**: BFCL-v4, τ² evaluation, deploy to Godspeed driver catalog.
+### Immediate: NVFP4 Compressed-Tensors Pipeline (Stage 1)
+1. **Quantize original ZAYA1-8B** → compressed-tensors NVFP4 format using `compressed_tensors` library `NVFP4A16` scheme
+2. **Save as safetensors** + `config.json` with `"quant_method": "compressed-tensors"` and `NVFP4A16` scheme
+3. **Serve via vLLM**: `vllm serve ./zaya-nvfp4-ct --dtype float16` — native `CompressedTensorsConfig` auto-detect, MoE via `CompressedTensorsMoEMethod`
+4. **Benchmark**: `lm_eval` against AIME'26 (89.1), GPQA-Diamond (71.0), MMLU-Pro (74.2), LiveCodeBench (65.8)
+5. **Publish**: HuggingFace model card with NVFP4 benchmark scores, compressed-tensors format
+
+### Follow-on: Blackwell CUDA Kernel (Stage 2)
+1. **Write custom CUDA kernel** for Blackwell NVFP4 Tensor Core MMA dequant (sm_120)
+2. **Register as vLLM quantization method** — drop-in replacement for Marlin FP4
+3. **Submit upstream PR** to vLLM — reusable across all models
+4. **Re-benchmark** with hardware-accelerated kernel (~4-5 GB VRAM)
+
+### Phase 3-7 (unchanged)
+- Phase 3: NVIDIA NIM credentials, Godspeed headless teacher trajectories
+- Phase 5: QLoRA SFT on verified trajectories, GRPO policy improvement
+- Phase 6: BFCL-v4, τ² evaluation
+- Phase 7: Deploy to Godspeed driver catalog

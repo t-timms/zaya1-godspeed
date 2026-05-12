@@ -107,33 +107,39 @@ fine-tuning stage. The fine-tuning task is distribution extension, not cold star
 
 | Path | Status | Speed | Notes |
 |------|--------|-------|-------|
-| **vLLM (Zyphra fork), FP8** | 🟡 Experimental | ~4 tok/s (1st req, JIT) | 8.76 GB model. Tested May 11: loads and serves, output quality **unverified**. Needs `--reasoning-parser qwen3`. First request slow (Triton JIT), subsequent should be faster. |
-| **vLLM (Zyphra fork), bf16** | ❌ OOM | N/A | 16.48 GB model exceeds 15.92 GB GPU. No room for KV cache. |
+| **vLLM (stock 0.20.2 + Zyphra Python overlay), FP8** | ✅ Verified | ~4 tok/s | 8.76 GB model, 4.58 GB KV cache. Tested May 12: server responds, `/v1/models` returns model info, application startup complete. Requires 3 patches: ModelRegistry registration, cca_state_shape, cca_state_dtype. |
+| **vLLM (stock 0.20.2 + Zyphra Python overlay), bf16** | ❌ OOM | N/A | 16.48 GB model exceeds 15.92 GB GPU. No room for KV cache. |
+| **NVFP4 GGUF → vLLM GGUF handler** | 🔴 Blocked | — | Custom loader achieved 803/2483 weights at 1.04 GB. Remaining 1440+ MoE expert weights blocked on FusedMoE routing + GGUFUninitializedParameter single-shard materialization. |
+| **NVFP4 Compressed-tensors (Stage 1)** | 🟡 Planned | Fast (Marlin FP4) | Quantize original BF16 → CT format. ~6.2 GB VRAM. 6-9 hrs. |
+| **NVFP4 Compressed-tensors + CUDA (Stage 2)** | ⬜ Planned | Fastest (Tensor Core) | Custom Blackwell sm_120 kernel. ~4-5 GB VRAM. 24-37 hrs. |
 | **NF4 + transformers** | ❌ Broken | 3 tok/s | Garbage output. Bitsandbytes NF4 dequant incompatible with Zaya CCA attention. |
-| **GGUF / llama.cpp** | ❌ Blocked | N/A | Zaya architecture not supported ([llama.cpp#22776](https://github.com/ggml-org/llama.cpp/issues/22776)). |
-| **NVFP4 (llama.cpp quantizer)** | ⬜ Planned | TBD | Our own 4 GB quantized model on Blackwell sm_120. See `ROADMAP.md`. |
+| **GGUF / llama.cpp** | ❌ Blocked | N/A | Zaya architecture not supported in llama.cpp (no model implementation, no converter entry). lainlives/ZAYA1-8B-GGUF is empty (0 GGUF files). |
 | **Zyphra Cloud** | Available | API latency | Serverless endpoint at cloud.zyphra.com. Needs API key. |
 
 ### vLLM deployment
 
+**Stock vLLM 0.20.2 + Zyphra Python file overlay** (recommended):
 ```bash
-# Full context (24 GB+ cards)
-vllm serve Zyphra/ZAYA1-8B --port 8010 \
-    --mamba-cache-dtype float32 --dtype bfloat16 \
-    --reasoning-parser qwen3 --enable-auto-tool-choice \
-    --tool-call-parser zaya_xml \
-    --max-num-seqs 2 --max-model-len 48000
+# Copy 5 Python files from Zyphra fork over stock vLLM:
+# vllm/model_executor/layers/mamba/cca.py
+# vllm/v1/attention/backends/cca_attn.py
+# vllm/model_executor/models/zaya.py
+# vllm/tool_parsers/zaya_tool_parser.py
+# vllm/transformers_utils/configs/zaya.py
 
-# 16 GB cards — FP8 quantization (8.76 GB model, 5.37 GB KV cache)
+# Apply 3 patches:
+# 1. ModelRegistry.register_model("ZayaForCausalLM", ...)
+# 2. MambaStateShapeCalculator.cca_state_shape
+# 3. MambaStateDtypeCalculator.cca_state_dtype
+
+# Serve:
 vllm serve Zyphra/ZAYA1-8B --port 8010 \
     --quantization fp8 --dtype bfloat16 \
-    --reasoning-parser qwen3 --enable-auto-tool-choice \
-    --tool-call-parser zaya_xml \
-    --max-num-seqs 1 --max-model-len 4096 \
+    --max-num-seqs 1 --max-model-len 2048 \
     --trust-remote-code --enforce-eager
 ```
 
-Requires the Zyphra vLLM fork built in WSL (see `scripts/build_vllm_detached.sh`).
+**Note**: `nvcc` must be in PATH for any vLLM source build. It's at `/usr/local/cuda/bin/nvcc` (CUDA 13.2) in WSL.
 
 ## DeepSeek V4 Pro Teacher (NVIDIA NIM)
 

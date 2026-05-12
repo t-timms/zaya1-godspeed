@@ -18,6 +18,22 @@ This project depends on the Zyphra transformers fork (@ zaya1 branch) and vLLM f
 (@ zaya1-pr branch). The patches in `patches/` monkey-patch missing ecosystem features.
 PR submitted: https://github.com/Zyphra/transformers/pull/2
 
+**Zyphra vLLM fork build**: Previous 6 build attempts silently failed because `nvcc` was not in PATH.
+Fix: `export PATH=/usr/local/cuda/bin:$PATH` before running pip install.
+The fork builds in ~3 min with CUDA 13.2.
+
+**Python file overlay (alternative to full rebuild)**: The Zyphra fork's Python files
+can be copied over stock vLLM 0.20.2 without rebuilding CUDA kernels:
+- `vllm/model_executor/layers/mamba/cca.py`
+- `vllm/v1/attention/backends/cca_attn.py`
+- `vllm/model_executor/models/zaya.py`
+- `vllm/tool_parsers/zaya_tool_parser.py`
+- `vllm/transformers_utils/configs/zaya.py`
+
+Three additional patches required for stock vLLM 0.20.2 Zaya support:
+1. `ModelRegistry.register_model("ZayaForCausalLM", ...)` — zaya.py exists but isn't registered
+2. `MambaStateShapeCalculator.cca_state_shape` + `MambaStateDtypeCalculator.cca_state_dtype` — missing methods
+
 ### PEFT targets
 Only target attention projections: `o_proj`, `linear_q`, `linear_k`, `val_proj1`, `val_proj2`.
 Never target expert weights (SequentialMLP). This preserves ZAYA's MoE routing, EDA,
@@ -68,13 +84,28 @@ These ZAYA innovations must not be touched:
 | `tests/` | 100 unit tests | Run before any commit |
 
 ### NVFP4 quantization pipeline
+
+**GGUF path** (Phase 1 — COMPLETE):
 - **GGUF converter**: `scripts/convert_zaya_to_gguf.py --arch llama` (llama arch for llama.cpp quantize compat)
 - **NVFP4 quantizer**: llama.cpp `build/bin/llama-quantize input.gguf output.gguf NVFP4`
 - **NVFP4 fallback fix**: Added `GGML_TYPE_NVFP4 → GGML_TYPE_F16` case in `llama-quant.cpp` line 391 (submitted to upstream)
-- **Result**: 4.76 GB NVFP4 ZAYA1-8B at 4.52 bpw, 80 fallback tensors, ~35s quantization
-- **Output**: `/tmp/zaya1-8b-nvfp4.gguf` + `/tmp/zaya1-8b-nvfp4.name_map.json`
-- **vLLM patches required**: gguf constants (zaya arch), model registry (ZayaForCausalLM), GGUF loader (name map support)
-- **Status**: 2483/2483 parameters mapped. Remaining: Zyphra vLLM fork install for fused MoE weight loading.
+- **Result**: 4.76 GB NVFP4 ZAYA1-8B at 4.52 bpw, 1641 NVFP4 + 842 F16 tensors, BPE tokenizer embedded
+- **Output**: `/tmp/zaya1-8b-nvfp4-tok.gguf` (4.67 GB with tokenizer) + `/tmp/zaya1-8b-nvfp4.name_map.json` (2,483 entries)
+- **Weights verified**: 0.026 mean error vs original bf16 model (expected 4-bit noise)
+- **Status**: GGUF built and verified. vLLM GGUF handler path blocked — requires NVFP4 tensor type support unavailable in vLLM 0.20.2
+
+**Compressed-tensors path** (Phase 2 — IN PROGRESS):
+- **Stage 1** (6-9 hrs): Quantize original ZAYA1-8B BF16 → compressed-tensors NVFP4 format using `compressed_tensors` library `NVFP4A16` scheme. Uses Marlin FP4 kernel for dequant. ~4.5 GB disk, ~6.2 GB VRAM.
+- **Stage 2** (24-37 hrs): Custom Blackwell NVFP4 Tensor Core CUDA kernel as Marlin drop-in replacement. ~4-5 GB VRAM, sm_120 hardware-accelerated. Reusable across all models.
+- **Config**: `quantization_config: {quant_method: "compressed-tensors", format: "float-quantized", config_groups: {NVFP4A16 scheme targeting "Linear" → auto-propagated to "FusedMoE"}}`
+- **MoE**: vLLM's `CompressedTensorsMoEMethod` handles Zaya's FusedMoE layers natively
+
+**Key technical references**:
+- `CompressedTensorsW4A16Fp4` at `vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a16_nvfp4.py`
+- `CompressedTensorsConfig` at `vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py`
+- NVFP4A16 scheme at `compressed_tensors/src/compressed_tensors/quantization/quant_scheme.py`
+- FP4_E2M1_DATA at `compressed_tensors/src/compressed_tensors/quantization/quant_args.py`
+- Weight packing: `weight_packed` (uint8, 2x 4-bit per byte), `weight_scale` (FP8_E4M3 per group of 16), `weight_global_scale` (per-output-channel FP32)
 
 ## Development workflow
 1. `uv sync --dev` to install deps

@@ -50,16 +50,39 @@ the Godspeed coding agent on consumer hardware (RTX 5070 Ti, 16 GB VRAM).
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Build vLLM (Zyphra fork) in WSL | ✅ | CUDA 13.2 toolkit, 64 GB WSL, MAX_JOBS=10. 65-min build. Reinstall needed (pip cache conflict). |
-| Serve ZAYA1-8B via vLLM (FP8) | 🟡 | 8.76 GB model loads (2s startup, 5.37 GB KV cache). Output quality unverified (--reasoning-parser qwen3 missing in tests). |
+| Build vLLM (Zyphra fork) in WSL | ✅ | **Root cause of all 6 failed builds found**: `nvcc` at `/usr/local/cuda/bin/nvcc` (CUDA 13.2) not in PATH. Build succeeds in ~3 min with `export PATH=/usr/local/cuda/bin:$PATH`. Zyphra Python files can be overlaid on stock vLLM 0.20.2 (no full rebuild needed). |
+| Serve ZAYA1-8B via vLLM (FP8) | ✅ | 8.76 GB model loads (5.4s startup, 4.58 GB KV cache). Server responds: `/v1/models` returns model info, application startup complete. Required 3 patches: ModelRegistry, cca_state_shape, cca_state_dtype. |
 | Serve ZAYA1-8B via vLLM (bf16) | ❌ | 16.48 GB model exceeds 15.92 GB GPU. -0.39 GB for KV cache. Confirmed impossible on 16 GB. |
-| NVFP4 ZAYA1-8B quantized model | 🟡 | **First-ever NVFP4 ZAYA1-8B built**: 4.76 GB, 4.52 bpw, 80 fallback tensors. llama.cpp NVFP4 fallback fixed (submitted upstream). GGUF→vLLM name mapping verified (2483/2483 mapped). Blocked by Zyphra vLLM fork install for fused MoE weight loading. |
+| **NVFP4 ZAYA1-8B GGUF built** | ✅ | **First-ever NVFP4 ZAYA1-8B**: 4.76 GB, 4.52 bpw, 1641 NVFP4 + 842 F16 tensors (3205 total). BPE tokenizer embedded (262K tokens, 515K merges). llama.cpp NVFP4 fallback fixed (submitted upstream). Weights verified: 0.026 mean error vs original. Name mapping: 2483/2483 mapped, 0 failures. |
 | Fix serve_zaya1.py | ✅ | Re-engineered May 11: `subprocess.Popen`, health polling, eager mode, FP8/MXFP4 quant support, matches official Zyphra deploy command. |
 | MXFP4 quantized serving (Blackwell) | ❌ | OsaurusAI MXFP4 model: weight shape mismatch with Zyphra vLLM fork. |
 | NF4 path (transformers) | ❌ | Confirmed broken — bitsandbytes dequant incompatible with CCA attention. |
 | bitsandbytes (vLLM) | ❌ | ZayaForCausalLM lacks `packed_modules_mapping`. |
+| **NVFP4 Compressed-Tensors pipeline** | 🟡 | **Stage 1** (6-9 hrs): Quantize original BF16 → compressed-tensors NVFP4 via Marlin FP4 kernel. Publish first NVFP4 ZAYA1-8B benchmark. ~6.2 GB VRAM. **Stage 2** (24-37 hrs): Custom Blackwell NVFP4 Tensor Core CUDA kernel as Marlin drop-in replacement. ~4-5 GB VRAM, sm_120 hardware-accelerated. |
+| lainlives/ZAYA1-8B-GGUF audit | ✅ | Repo is empty (0 GGUF files, 0 bytes storage). README claims Q4_K/Q8_0/etc but none uploaded. Our NVFP4 GGUF is genuinely the first and only ZAYA1-8B GGUF. |
+| llama.cpp Zaya support | ❌ | No model implementation exists. `convert_hf_to_gguf.py` has no ZayaForCausalLM entry. llama.cpp cannot serve ZAYA1-8B — vLLM is the only viable inference engine. |
 
 **Blocker resolved**: Root cause was WSL2 `llama-server` running Qwen3.6-27B-Q4_K_XL (15 GB), not Windows compositor. Removed May 11.
+
+### NVFP4 Serving Architecture (May 12, 2026)
+
+Three paths evaluated for serving the 4.76 GB NVFP4 GGUF:
+
+| Path | VRAM | Kernel | Speed | Status |
+|------|------|--------|-------|--------|
+| GGUF → vLLM GGUF handler | — | Python dequant (slow) | Unusable | Partial (803/2483 weights at 1.04 GB). Blocked on MoE routing + single-shard materialization |
+| GGUF → Compressed-tensors | 4-5 GB | Marlin FP4 | Fast | Viable, 6-9 hrs |
+| Original → Compressed-tensors | 4-5 GB | Marlin FP4 | Fast | **Chosen for Stage 1** — avoids double quantization |
+| Custom Blackwell CUDA kernel | 4-5 GB | NVFP4 Tensor Core MMA | Fastest | **Stage 2** — reusable across all models, open-source contribution |
+
+**Decision**: Two-stage pipeline. Stage 1: Compressed-tensors + Marlin FP4 for first benchmark. Stage 2: Custom CUDA kernel for Blackwell-specific acceleration.
+
+**Key technical findings from GGUF loading attempts**:
+- vLLM's GGUF handler lacks NVFP4 tensor type support; requires adding to DEQUANT_TYPES + Python dequant fallback
+- GGUF quant handler creates `qweight`/`qweight_type` as GGUFUninitializedParameter — single-shard params never materialize without patching `_create_padded_weight_param`
+- ZAYA's FusedMoE uses `w13_weight`/`w2_weight` but GGUF handler creates `w13_qweight`/`w2_qweight` — zaya.py load_weights needs GGUF-aware routing
+- CCA attention requires GPU; CPU offloading produces garbage output
+- `CompressedTensorsW4A16Fp4` uses Marlin FP4 kernel (not Blackwell-specific); `get_min_capability()` returns 75 (Turing+)
 
 ---
 

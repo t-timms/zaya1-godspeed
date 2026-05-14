@@ -70,9 +70,7 @@ def _patch_logits_to_keep(forward_fn):
 
         if hasattr(outputs, "logits") and outputs.logits is not None:
             slice_indices = (
-                slice(-logits_to_keep, None)
-                if isinstance(logits_to_keep, int) and logits_to_keep > 0
-                else slice(None)
+                slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) and logits_to_keep > 0 else slice(None)
             )
             if slice_indices != slice(None):
                 outputs["logits"] = outputs.logits[:, slice_indices, :]
@@ -200,9 +198,7 @@ def _test_patches_safe() -> bool:
         assert getattr(ZayaPreTrainedModel, "_supports_flash_attn", False)
         assert getattr(ZayaPreTrainedModel, "_supports_sdpa", False)
         assert getattr(ZayaPreTrainedModel, "_can_compile_fullgraph", False)
-        assert getattr(ZayaForCausalLM, "_tied_weights_keys", None) == {
-            "lm_head.weight": "model.embed_tokens.weight"
-        }
+        assert getattr(ZayaForCausalLM, "_tied_weights_keys", None) == {"lm_head.weight": "model.embed_tokens.weight"}
         assert hasattr(ZayaConfig, "router_aux_loss_coef")
         return True
     except Exception:

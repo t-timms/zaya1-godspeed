@@ -1,3 +1,221 @@
 {
-  "permission": "allow"
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/kimi-k2.5",
+  "default_agent": "build",
+  "username": "Tremayne",
+  "shell": "powershell",
+  "share": "manual",
+  "snapshot": true,
+  "autoupdate": "notify",
+
+  "formatter": {
+    "ruff": {
+      "command": ["uv", "run", "ruff", "format", "$FILE", "--line-length", "120"]
+    }
+  },
+
+  "instructions": ["AGENTS.md", "COMPATIBILITY.md", "RESEARCH.md", "ROADMAP.md"],
+
+  "lsp": {
+    "pyright": {
+      "env": {
+        "VIRTUAL_ENV": ".venv"
+      }
+    }
+  },
+
+  "mcp": {
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp",
+      "enabled": true
+    },
+    "gh_grep": {
+      "type": "remote",
+      "url": "https://mcp.grep.app",
+      "enabled": false
+    },
+    "cuda-monitor": {
+      "type": "local",
+      "command": ["uv", "run", "python", "scripts/cuda_mcp_server.py"],
+      "enabled": true
+    }
+  },
+
+  "watcher": {
+    "ignore": [
+      ".git",
+      "__pycache__",
+      "*.pyc",
+      ".venv",
+      ".pytest_cache",
+      ".ruff_cache",
+      "wandb",
+      "*.gguf",
+      "*.safetensors",
+      "*.bin",
+      "*.pt",
+      "*.ckpt",
+      "checkpoints",
+      "outputs",
+      "*.onnx",
+      "*.engine",
+      "*.plan",
+      "*.npy",
+      "cache",
+      "*.arrow",
+      "*.parquet",
+      ".idea",
+      ".vscode"
+    ]
+  },
+
+  "permission": {
+    "read": "allow",
+    "edit": "ask",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "bash": "ask",
+    "task": "allow",
+    "external_directory": "ask",
+    "todowrite": "allow",
+    "question": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "lsp": "allow",
+    "doom_loop": "ask",
+    "skill": "allow"
+  },
+
+  "command": {
+    "lint": {
+      "template": "Run Ruff lint and format on the project. Execute `uv run ruff check . --fix && uv run ruff format .`. Report any issues found.",
+      "description": "Lint and format Python code",
+      "subtask": true
+    },
+    "typecheck": {
+      "template": "Run the type checker. Try `uv run ty check .` first, then `uv run mypy .` if ty is not available. Report any type errors.",
+      "description": "Run type checker",
+      "subtask": true
+    },
+    "test": {
+      "template": "Run the full test suite. Execute `uv run pytest tests/ -q`. Report pass/fail counts and any failures. All 100 tests must pass.",
+      "description": "Run 100 unit tests",
+      "subtask": true
+    },
+    "preflight": {
+      "template": "Run GPU and environment preflight checks. 1) `nvidia-smi` for GPU health and VRAM. 2) `uv run python -c \"import torch; print('CUDA:', torch.cuda.get_device_name(0)); print('VRAM free:', torch.cuda.mem_get_info()[0]/1e9, 'GB')\"` 3) `uv sync` to verify dependencies. Report GPU status, VRAM budget, and any anomalies.",
+      "description": "GPU health and environment check before training",
+      "subtask": false
+    },
+    "preflight-full": {
+      "template": "Run comprehensive preflight: 1) GPU health via nvidia-smi (temp <50C idle, VRAM free >14GB). 2) Verify uv sync completes. 3) Run PEFT compatibility test: `uv run python scripts/test_peft.py`. 4) Verify Zyphra transformers fork loads: `uv run python -c \"from transformers.models.zaya import ZayaForCausalLM; print('ZayaForCausalLM OK')\"`. 5) Apply patches and verify: `uv run python -c \"from patches.apply_zaya_patches import apply_all_patches; apply_all_patches(); print('Patches OK')\"`. Report pass/fail for each gate.",
+      "description": "Full preflight including PEFT and Zyphra fork verification",
+      "subtask": false
+    },
+    "smoke-test": {
+      "template": "Run Gate 1 inference quality smoke test. Execute `uv run python scripts/smoke_test_inference.py --base-url http://localhost:8010/v1 --model Zyphra/ZAYA1-8B --prompts prompts/smoke_test.jsonl`. Verify: coherent output, <think>/<|im_end|> tokens handled, tool-call XML parses correctly on >=4/5 prompts. Report pass/fail for each prompt.",
+      "description": "Gate 1: Verify vLLM FP8 inference quality with 5 prompts",
+      "subtask": false
+    },
+    "test-max-len": {
+      "template": "Run Gate 2 max-model-len regression test. Test if --max-model-len 4096 works on the FP8 server. If the server is running with 2048, kill it and restart with 4096. Execute `python scripts/serve_zaya1.py --port 8010 --quantization fp8 --max-model-len 4096 --start`. If OOM or corrupt output, document root cause and keep 2048. Report result and final value.",
+      "description": "Gate 2: Test max-model-len 4096 vs current 2048",
+      "subtask": false
+    },
+    "probe-ct": {
+      "template": "Run Gate 3 CCA compatibility probe. Execute `uv run python scripts/probe_ct_quantization.py`. This tests compressed_tensors NVFP4A16 scheme on the first 2 layers of ZAYA1-8B. Verify: CCA attention layers are correctly targeted or explicitly skipped to BF16, FusedMoE layers are in the targeted set, no crash during quantization prep. Report pass/fail and any incompatibility findings.",
+      "description": "Gate 3: Probe compressed_tensors on Zaya CCA architecture",
+      "subtask": false
+    },
+    "build-calibration": {
+      "template": "Run Gate 4 calibration dataset build. Execute `uv run python scripts/build_calibration_data.py`. Builds 512 samples from MATH-500, HumanEval, ShareGPT, AIME. Tokenize to 1024 tokens each. Verify dataset saved to data/calibration/. Report sample count, token distribution, and source breakdown.",
+      "description": "Gate 4: Build NVFP4 calibration dataset (512 samples)",
+      "subtask": false
+    },
+    "validate-gates": {
+      "template": "Run all 4 validation gates sequentially. Report pass/fail for each: 1) Gate 1 smoke-test: inference quality on 5 prompts. 2) Gate 2 test-max-len: 4096 vs 2048 regression. 3) Gate 3 probe-ct: CCA compressed_tensors compatibility. 4) Gate 4 build-calibration: 512-sample dataset. If all pass, Stage 1 quantization is cleared to proceed. If any fail, fix before committing compute.",
+      "description": "Run all 4 validation gates before Stage 1 quantization",
+      "subtask": false
+    },
+    "stage1-quantize": {
+      "template": "Run Stage 1 NVFP4 compressed-tensors quantization. WARNING: 6-9 hours GPU compute. Execute `uv run python scripts/quantize_zaya_ct_nvfp4.py`. Prerequisites: all 4 validation gates must pass first. Expected output: ./zaya1-8b-nvfp4-ct/ with safetensors + config.json containing quantization_config. Monitor VRAM: expect ~6.2 GB peak. Report quantization time, model size, compression ratio, and any errors.",
+      "description": "Stage 1: Quantize ZAYA1-8B to NVFP4 compressed-tensors (6-9 hrs)",
+      "subtask": false
+    },
+    "stage1-benchmark": {
+      "template": "Benchmark the Stage 1 NVFP4 CT model against BF16 baselines. Execute lm_eval against AIME'26, GPQA-Diamond, MMLU-Pro, LiveCodeBench. Degradation thresholds: AIME < -3.0, GPQA < -2.0, MMLU-Pro < -1.5, LiveCodeBench < -2.0. If any benchmark fails, investigate CCA fallback tensors. Report scores and pass/fail vs each threshold.",
+      "description": "Benchmark Stage 1 NVFP4 model vs BF16 baseline",
+      "subtask": false
+    },
+    "stage1-publish": {
+      "template": "Publish Stage 1 NVFP4 model to HuggingFace. Execute `uv run python scripts/push_to_hub.py`. Uploads ./zaya1-8b-nvfp4-ct/ to t-timms/ZAYA1-8B-NVFP4-CT. Verify model card includes: hardware (RTX 5070 Ti), quantization method (compressed-tensors NVFP4A16), calibration (512 mixed reasoning), benchmark table, serving command. Report HF URL after upload.",
+      "description": "Publish Stage 1 NVFP4 model to HuggingFace",
+      "subtask": false
+    },
+    "train-dry-run": {
+      "template": "Run a training dry-run to validate VRAM budget. Execute `uv run python scripts/train.py --config configs/lora_tool_call.yaml --dry-run`. Verify: VRAM stays under 14GB, forward+backward pass succeeds, no OOM. Report peak VRAM and whether the config is safe for full training.",
+      "description": "Training dry-run for VRAM validation",
+      "subtask": false
+    },
+    "nvfp4-weights": {
+      "template": "Verify NVFP4 GGUF weight integrity. Execute `uv run python scripts/verify_nvfp4_weights.py`. Checks: mean error vs original BF16 model (expected ~0.026), 1641 NVFP4 + 842 F16 tensors, 4.52 bpw effective, name_map.json has 2483 entries with 0 failures. Report pass/fail for each check.",
+      "description": "Verify NVFP4 GGUF weight integrity",
+      "subtask": false
+    },
+    "audit-secrets": {
+      "template": "Audit the repository for secrets and hardcoded credentials. Search for: API keys, .env files, BEGIN PRIVATE KEY, tokens with prefixes nvapi-, sk-ant-, sk-, AIza, ghp_, AKIA, hf_. Check .gitignore excludes sensitive files. Report any findings with file paths.",
+      "description": "Secrets audit scan",
+      "subtask": true
+    },
+    "env-check": {
+      "template": "Verify the conda environment for this project. Execute `conda activate mlenv && python -c \"import torch,transformers,trl,unsloth,peft,bitsandbytes; print('torch', torch.__version__); print('CUDA:', torch.cuda.get_device_name(0)); print('VRAM free:', torch.cuda.mem_get_info()[0]/1e9, 'GB')\"`. Report version mismatches vs expected values in AGENTS.md.",
+      "description": "Verify mlenv conda environment versions",
+      "subtask": true
+    }
+  },
+
+  "agent": {
+    "zaya-build": {
+      "mode": "primary",
+      "model": "opencode-go/kimi-k2.5",
+      "temperature": 0.3,
+      "steps": 50,
+      "permission": {
+        "read": "allow",
+        "edit": "ask",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "bash": "ask",
+        "task": "allow",
+        "external_directory": "ask",
+        "todowrite": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "skill": "allow"
+      }
+    },
+    "zaya-plan": {
+      "mode": "primary",
+      "model": "opencode-go/kimi-k2.5",
+      "temperature": 0.1,
+      "steps": 30,
+      "permission": {
+        "read": "allow",
+        "edit": "deny",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "bash": "deny",
+        "task": "allow",
+        "external_directory": "deny",
+        "todowrite": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "skill": "allow"
+      }
+    }
+  }
 }

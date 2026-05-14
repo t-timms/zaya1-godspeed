@@ -201,9 +201,7 @@ def base_tasks():
 
 @pytest.fixture
 def tmp_conversation_file(full_ok_conversation):
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".conversation.jsonl", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".conversation.jsonl", delete=False, encoding="utf-8") as f:
         for msg in full_ok_conversation:
             f.write(json.dumps(msg) + "\n")
     yield Path(f.name)
@@ -217,9 +215,7 @@ def tmp_conversation_dir(tmp_conversation_file):
 
 @pytest.fixture
 def tmp_tasks_file(base_tasks):
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         for task in base_tasks:
             f.write(json.dumps(task) + "\n")
     yield Path(f.name)
@@ -228,9 +224,7 @@ def tmp_tasks_file(base_tasks):
 
 @pytest.fixture
 def tmp_output_file():
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         pass
     p = Path(f.name)
     yield p

@@ -34,6 +34,7 @@ def patch() -> None:
     # Patch vLLM's GGUF loader to handle zaya architecture
     try:
         import vllm.model_executor.model_loader.gguf_loader as gl
+
         _orig_init = gl.GGUFLoader.__init__
 
         def patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
@@ -59,6 +60,7 @@ def get_model_class_for_zaya():
     """Return the ZayaForCausalLM class for GGUF loading."""
     try:
         from vllm.model_executor.models.zaya import ZayaForCausalLM
+
         return ZayaForCausalLM
     except ImportError:
         return None

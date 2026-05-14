@@ -1,0 +1,29 @@
+{
+  "model": "Zyphra/ZAYA1-8B",
+  "quantization": {
+    "method": "compressed-tensors",
+    "format": "float-quantized",
+    "scheme": "NVFP4A16",
+    "num_bits": 4,
+    "type": "float",
+    "strategy": "tensor_group",
+    "group_size": 16,
+    "target_modules": [
+      "Linear"
+    ],
+    "weight_packed_dtype": "uint8",
+    "weight_scale_dtype": "float8_e4m3fn (native FP8 via safetensors 0.7+ GPU save)",
+    "weight_global_scale_dtype": "float32",
+    "zero_point": "none (symmetric)",
+    "compressor": "NVFP4PackedCompressor",
+    "effective_bpw_estimate": 5.2
+  },
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "vram": "16 GB",
+    "cuda": "12.8"
+  },
+  "modules_compressed": 1481,
+  "output_size_bytes": 4620821036,
+  "dry_run": false
+}

@@ -43,68 +43,86 @@ class TestHasToolUse:
 class TestParseConversation:
     def test_valid_multiturn_trajectory(self, tmp_path):
         tool_call_str = '<zyphra_tool_call>{"name":"file_read","arguments":{}}</zyphra_tool_call>'
-        filepath = _write_conversation(tmp_path, [
-            {"role": "system", "content": "Agent with tools."},
-            {"role": "user", "content": "Fix bug."},
-            {"role": "assistant", "content": tool_call_str},
-            {"role": "tool", "content": "file content"},
-            {"role": "assistant", "content": "Bug fixed."},
-        ])
+        filepath = _write_conversation(
+            tmp_path,
+            [
+                {"role": "system", "content": "Agent with tools."},
+                {"role": "user", "content": "Fix bug."},
+                {"role": "assistant", "content": tool_call_str},
+                {"role": "tool", "content": "file content"},
+                {"role": "assistant", "content": "Bug fixed."},
+            ],
+        )
         result = gen.parse_conversation(filepath)
         assert result is not None
         assert len(result) == 5
 
     def test_too_few_messages(self, tmp_path):
-        filepath = _write_conversation(tmp_path, [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ])
+        filepath = _write_conversation(
+            tmp_path,
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+        )
         result = gen.parse_conversation(filepath)
         assert result is None
 
     def test_no_tool_use(self, tmp_path):
-        filepath = _write_conversation(tmp_path, [
-            {"role": "system", "content": "agent"},
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ])
+        filepath = _write_conversation(
+            tmp_path,
+            [
+                {"role": "system", "content": "agent"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+        )
         result = gen.parse_conversation(filepath)
         assert result is None
 
     def test_single_turn_only(self, tmp_path):
         tool_call_str = '<zyphra_tool_call>{"name":"file_read","arguments":{}}</zyphra_tool_call>'
-        filepath = _write_conversation(tmp_path, [
-            {"role": "system", "content": "agent"},
-            {"role": "user", "content": "read file"},
-            {"role": "assistant", "content": tool_call_str},
-            {"role": "tool", "content": "content"},
-        ])
+        filepath = _write_conversation(
+            tmp_path,
+            [
+                {"role": "system", "content": "agent"},
+                {"role": "user", "content": "read file"},
+                {"role": "assistant", "content": tool_call_str},
+                {"role": "tool", "content": "content"},
+            ],
+        )
         result = gen.parse_conversation(filepath)
         assert result is None
 
     def test_malformed_lines_skipped(self, tmp_path):
-        filepath = _write_conversation_raw(tmp_path, [
-            '{"role": "system", "content": "agent"}\n',
-            "not valid json\n",
-            '{"role": "user", "content": "hi"}\n',
-            '{"role": "assistant", "content": "<zyphra_tool_call>{\\\"name\\\":\\\"x\\\"}</zyphra_tool_call>"}\n',
-            '{"role": "tool", "content": "result"}\n',
-            '{"role": "assistant", "content": "done"}\n',
-        ])
+        filepath = _write_conversation_raw(
+            tmp_path,
+            [
+                '{"role": "system", "content": "agent"}\n',
+                "not valid json\n",
+                '{"role": "user", "content": "hi"}\n',
+                '{"role": "assistant", "content": "<zyphra_tool_call>{\\"name\\":\\"x\\"}</zyphra_tool_call>"}\n',
+                '{"role": "tool", "content": "result"}\n',
+                '{"role": "assistant", "content": "done"}\n',
+            ],
+        )
         result = gen.parse_conversation(filepath)
         assert result is not None
         assert len(result) == 5
 
     def test_blank_lines_skipped(self, tmp_path):
-        filepath = _write_conversation_raw(tmp_path, [
-            '\n',
-            '{"role": "system", "content": "agent"}\n',
-            '{"role": "user", "content": "do something"}\n',
-            '{"role": "assistant", "content": "<zyphra_tool_call>x</zyphra_tool_call>"}\n',
-            '{"role": "tool", "content": "result"}\n',
-            '\n',
-            '{"role": "assistant", "content": "done"}\n',
-        ])
+        filepath = _write_conversation_raw(
+            tmp_path,
+            [
+                "\n",
+                '{"role": "system", "content": "agent"}\n',
+                '{"role": "user", "content": "do something"}\n',
+                '{"role": "assistant", "content": "<zyphra_tool_call>x</zyphra_tool_call>"}\n',
+                '{"role": "tool", "content": "result"}\n',
+                "\n",
+                '{"role": "assistant", "content": "done"}\n',
+            ],
+        )
         result = gen.parse_conversation(filepath)
         assert result is not None
         assert len(result) == 5

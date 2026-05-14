@@ -534,9 +534,7 @@ def remap_directory(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Remap Godspeed conversation JSONL to ZAYA1-8B ChatML format"
-    )
+    parser = argparse.ArgumentParser(description="Remap Godspeed conversation JSONL to ZAYA1-8B ChatML format")
     parser.add_argument(
         "--input-dir",
         default=str(Path.home() / ".godspeed" / "training"),

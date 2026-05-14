@@ -1,0 +1,19 @@
+{
+  "version": "1.0.0",
+  "created": "2026-05-12T07:00:36Z",
+  "model": "Zyphra/ZAYA1-8B",
+  "purpose": "NVFP4 Stage 1 calibration data for compressed_tensors quantization",
+  "total_samples": 512,
+  "max_length": 1024,
+  "shape": [
+    512,
+    1024
+  ],
+  "dtype": "torch.int64",
+  "source_breakdown": {
+    "math500": 226,
+    "humaneval": 128,
+    "sharegpt": 128,
+    "aime": 30
+  }
+}

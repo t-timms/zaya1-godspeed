@@ -135,7 +135,7 @@ _OOD_TASKS = [
     {
         "task_id": "ood-db-migration-01",
         "prompt": "Write a database migration that adds a 'last_login' timestamp column to the users table. "
-                  "Use alembic conventions. The migration must be reversible.",
+        "Use alembic conventions. The migration must be reversible.",
         "expected_tools": ["glob_search", "file_read", "file_write", "shell"],
         "expected_tool_sequence": ["glob_search", "file_read", "file_write", "shell"],
         "difficulty": "medium",
@@ -144,7 +144,7 @@ _OOD_TASKS = [
     {
         "task_id": "ood-api-pagination-01",
         "prompt": "Add cursor-based pagination to the GET /users endpoint. "
-                  "Return a 'next_cursor' field in the response. Handle empty results.",
+        "Return a 'next_cursor' field in the response. Handle empty results.",
         "expected_tools": ["grep_search", "file_read", "file_edit", "test_runner"],
         "expected_tool_sequence": ["grep_search", "file_read", "file_edit", "test_runner"],
         "difficulty": "hard",
@@ -153,7 +153,7 @@ _OOD_TASKS = [
     {
         "task_id": "ood-log-sanitize-01",
         "prompt": "Audit all log statements for potential PII leakage. "
-                  "Replace any logging of email addresses, IP addresses, or user IDs with hashed versions.",
+        "Replace any logging of email addresses, IP addresses, or user IDs with hashed versions.",
         "expected_tools": ["grep_search", "file_read", "file_edit", "verify"],
         "expected_tool_sequence": ["grep_search", "file_read", "file_edit", "verify"],
         "difficulty": "medium",
@@ -162,8 +162,8 @@ _OOD_TASKS = [
     {
         "task_id": "ood-circuit-breaker-01",
         "prompt": "Implement a circuit breaker for the database connection pool. "
-                  "After 3 consecutive failures, open the circuit for 30 seconds. "
-                  "Log state transitions.",
+        "After 3 consecutive failures, open the circuit for 30 seconds. "
+        "Log state transitions.",
         "expected_tools": ["file_read", "grep_search", "file_write", "test_runner"],
         "expected_tool_sequence": ["file_read", "grep_search", "file_write", "test_runner"],
         "difficulty": "hard",
@@ -172,7 +172,7 @@ _OOD_TASKS = [
     {
         "task_id": "ood-env-validation-01",
         "prompt": "Add startup validation for all required environment variables. "
-                  "If DATABASE_URL, JWT_SECRET, or REDIS_URL are missing, fail fast with a clear error message.",
+        "If DATABASE_URL, JWT_SECRET, or REDIS_URL are missing, fail fast with a clear error message.",
         "expected_tools": ["file_read", "file_edit", "shell", "test_runner"],
         "expected_tool_sequence": ["file_read", "file_edit", "shell", "test_runner"],
         "difficulty": "easy",
@@ -181,7 +181,7 @@ _OOD_TASKS = [
     {
         "task_id": "ood-rate-limit-config-01",
         "prompt": "Make the rate limiter configurable via environment variables. "
-                  "Add RATE_LIMIT_REQUESTS and RATE_LIMIT_WINDOW_SECONDS env vars with sensible defaults.",
+        "Add RATE_LIMIT_REQUESTS and RATE_LIMIT_WINDOW_SECONDS env vars with sensible defaults.",
         "expected_tools": ["grep_search", "file_read", "file_edit", "verify", "test_runner"],
         "expected_tool_sequence": ["grep_search", "file_read", "file_edit", "verify", "test_runner"],
         "difficulty": "medium",
@@ -190,7 +190,7 @@ _OOD_TASKS = [
     {
         "task_id": "ood-health-check-01",
         "prompt": "Add a GET /health endpoint that returns 200 if the database is reachable, "
-                  "503 if not. Include uptime and version info in the response.",
+        "503 if not. Include uptime and version info in the response.",
         "expected_tools": ["file_read", "grep_search", "file_edit", "test_runner"],
         "expected_tool_sequence": ["file_read", "grep_search", "file_edit", "test_runner"],
         "difficulty": "easy",
@@ -199,7 +199,7 @@ _OOD_TASKS = [
     {
         "task_id": "ood-metrics-endpoint-01",
         "prompt": "Add a GET /metrics endpoint that exposes Prometheus-compatible metrics "
-                  "for request count, request duration histogram, and error count by endpoint.",
+        "for request count, request duration histogram, and error count by endpoint.",
         "expected_tools": ["file_read", "grep_search", "file_write", "file_edit"],
         "expected_tool_sequence": ["file_read", "grep_search", "file_write", "file_edit"],
         "difficulty": "hard",
@@ -208,7 +208,7 @@ _OOD_TASKS = [
     {
         "task_id": "ood-request-id-01",
         "prompt": "Add X-Request-ID header propagation. Generate a UUID if the header is missing. "
-                  "Include the request ID in all log messages for the request lifetime.",
+        "Include the request ID in all log messages for the request lifetime.",
         "expected_tools": ["grep_search", "file_read", "file_edit", "file_write"],
         "expected_tool_sequence": ["grep_search", "file_read", "file_edit", "file_write"],
         "difficulty": "medium",
@@ -217,8 +217,8 @@ _OOD_TASKS = [
     {
         "task_id": "ood-retry-backoff-01",
         "prompt": "Add exponential backoff with jitter to the HTTP client retry logic. "
-                  "Replace the fixed 1-second retry delay with: 1s, 2s, 4s, 8s (max 30s). "
-                  "Add +/- 10% random jitter.",
+        "Replace the fixed 1-second retry delay with: 1s, 2s, 4s, 8s (max 30s). "
+        "Add +/- 10% random jitter.",
         "expected_tools": ["grep_search", "file_read", "file_edit", "test_runner", "verify"],
         "expected_tool_sequence": ["grep_search", "file_read", "file_edit", "test_runner", "verify"],
         "difficulty": "hard",
@@ -284,8 +284,8 @@ def _compose_tasks(task1: dict, task2: dict) -> dict:
     new_task["task_id"] = f"{task1['task_id']}-compose-{task2['task_id']}"
     new_task["prompt"] = f"{task1['prompt']}\n\nAlso: {task2['prompt']}"
     new_task["expected_tools"] = list(set(task1.get("expected_tools", []) + task2.get("expected_tools", [])))
-    new_task["expected_tool_sequence"] = (
-        task1.get("expected_tool_sequence", []) + task2.get("expected_tool_sequence", [])
+    new_task["expected_tool_sequence"] = task1.get("expected_tool_sequence", []) + task2.get(
+        "expected_tool_sequence", []
     )
     new_task["difficulty"] = "hard" if task1["difficulty"] == "hard" or task2["difficulty"] == "hard" else "medium"
     new_task["success_criteria"] = f"{task1.get('success_criteria', '')} AND {task2.get('success_criteria', '')}"
@@ -375,9 +375,7 @@ def mutate_tasks(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Expand Godspeed benchmark tasks into 200+ variants"
-    )
+    parser = argparse.ArgumentParser(description="Expand Godspeed benchmark tasks into 200+ variants")
     parser.add_argument("--tasks", default="benchmarks/tasks.jsonl")
     parser.add_argument("--output", default="data/mutated_tasks.jsonl")
     parser.add_argument("--count", type=int, default=200)
@@ -389,10 +387,7 @@ def main() -> None:
 
     tasks_path = Path(args.tasks)
     if not tasks_path.exists():
-        tasks_path = (
-            Path("C:/Users/ttimm/Documents/Project Portfolio/godspeed-coding-agent")
-            / args.tasks
-        )
+        tasks_path = Path("C:/Users/ttimm/Documents/Project Portfolio/godspeed-coding-agent") / args.tasks
     if not tasks_path.exists():
         logger.error("Tasks file not found: %s", args.tasks)
         raise SystemExit(1)

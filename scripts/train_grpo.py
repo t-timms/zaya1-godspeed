@@ -32,9 +32,7 @@ _ZAYA_TOOL_CALL_RE = re.compile(r"<zyphra_tool_call>(.*?)</zyphra_tool_call>", r
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="GRPO fine-tune ZAYA1-8B for tool calling"
-    )
+    parser = argparse.ArgumentParser(description="GRPO fine-tune ZAYA1-8B for tool calling")
     parser.add_argument("--config", default="configs/lora_tool_call.yaml")
     parser.add_argument("--data", default="data/train_zaya.jsonl")
     parser.add_argument("--adapter", help="SFT adapter path to resume from")

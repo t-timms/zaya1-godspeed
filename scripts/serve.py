@@ -46,16 +46,28 @@ def main() -> None:
     args = parser.parse_args()
 
     cmd = [
-        sys.executable, "-m", "vllm", "serve", args.model_id,
-        "--port", str(args.port),
-        "--mamba-cache-dtype", "float32",
-        "--dtype", "bfloat16",
-        "--reasoning-parser", "qwen3",
+        sys.executable,
+        "-m",
+        "vllm",
+        "serve",
+        args.model_id,
+        "--port",
+        str(args.port),
+        "--mamba-cache-dtype",
+        "float32",
+        "--dtype",
+        "bfloat16",
+        "--reasoning-parser",
+        "qwen3",
         "--enable-auto-tool-choice",
-        "--tool-call-parser", "zaya_xml",
-        "--max-model-len", str(args.max_model_len),
-        "--max-num-seqs", str(args.max_num_seqs),
-        "--gpu-memory-utilization", str(args.gpu_memory_utilization),
+        "--tool-call-parser",
+        "zaya_xml",
+        "--max-model-len",
+        str(args.max_model_len),
+        "--max-num-seqs",
+        str(args.max_num_seqs),
+        "--gpu-memory-utilization",
+        str(args.gpu_memory_utilization),
     ]
 
     print(f"Starting vLLM server: {' '.join(cmd)}")

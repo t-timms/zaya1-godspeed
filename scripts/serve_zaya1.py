@@ -26,7 +26,7 @@ import urllib.request
 
 DEFAULT_MODEL = "Zyphra/ZAYA1-8B"
 DEFAULT_PORT = 8010
-DEFAULT_MAX_LEN = 16384
+DEFAULT_MAX_LEN = 2048
 DEFAULT_MAX_SEQS = 2
 DEFAULT_GPU_MEM = 0.90
 DEFAULT_WAIT = 600
@@ -152,15 +152,18 @@ def print_command(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="ZAYA1-8B vLLM server for Godspeed")
     parser.add_argument(
-        "--start", action="store_true",
+        "--start",
+        action="store_true",
         help="Start the server (default: print command only)",
     )
     parser.add_argument(
-        "--daemon", action="store_true",
+        "--daemon",
+        action="store_true",
         help="Start and exit immediately (dont wait for ready)",
     )
     parser.add_argument(
-        "--port", type=int,
+        "--port",
+        type=int,
         default=int(os.environ.get("ZAYA_PORT", str(DEFAULT_PORT))),
     )
     parser.add_argument(
@@ -168,20 +171,30 @@ def main() -> None:
         default=os.environ.get("ZAYA_MODEL_ID", DEFAULT_MODEL),
     )
     parser.add_argument(
-        "--max-model-len", type=int, default=DEFAULT_MAX_LEN,
+        "--max-model-len",
+        type=int,
+        default=DEFAULT_MAX_LEN,
     )
     parser.add_argument(
-        "--max-num-seqs", type=int, default=DEFAULT_MAX_SEQS,
+        "--max-num-seqs",
+        type=int,
+        default=DEFAULT_MAX_SEQS,
     )
     parser.add_argument(
-        "--gpu-memory", type=float, default=DEFAULT_GPU_MEM,
+        "--gpu-memory",
+        type=float,
+        default=DEFAULT_GPU_MEM,
     )
     parser.add_argument(
-        "--enforce-eager", action="store_true", default=True,
+        "--enforce-eager",
+        action="store_true",
+        default=True,
         help="Skip CUDA graph warmup (default: on)",
     )
     parser.add_argument(
-        "--no-enforce-eager", dest="enforce_eager", action="store_false",
+        "--no-enforce-eager",
+        dest="enforce_eager",
+        action="store_false",
         help="Use torch.compile warmup (adds ~8 min startup)",
     )
     parser.add_argument(
@@ -189,11 +202,14 @@ def main() -> None:
         help="Quantization: fp8, mx_fp4, awq, gptq, etc.",
     )
     parser.add_argument(
-        "--wait", type=int, default=DEFAULT_WAIT,
+        "--wait",
+        type=int,
+        default=DEFAULT_WAIT,
         help="Max seconds to wait for ready",
     )
     parser.add_argument(
-        "--quiet", action="store_true",
+        "--quiet",
+        action="store_true",
         help="Suppress server output",
     )
     args = parser.parse_args()

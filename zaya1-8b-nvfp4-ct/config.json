@@ -1,0 +1,78 @@
+{
+  "activation_func": "swiglu",
+  "activation_func_fp8_input_store": false,
+  "add_bias_linear": false,
+  "architectures": [
+    "ZayaForCausalLM"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bias_activation_fusion": true,
+  "bos_token_id": 2,
+  "cca": true,
+  "cca_time0": 2,
+  "cca_time1": 2,
+  "clamp_temp": false,
+  "dtype": "bfloat16",
+  "eos_token_id": 106,
+  "ffn_hidden_size": 4096,
+  "gated_linear_unit": true,
+  "head_dim": 128,
+  "hidden_size": 2048,
+  "kv_channels": 128,
+  "lm_head_bias": false,
+  "mamba_cache_dtype": "float32",
+  "max_position_embeddings": 131072,
+  "model_type": "zaya",
+  "moe_router_topk": 1,
+  "norm_epsilon": 1e-05,
+  "normalization": "RMSNorm",
+  "num_attention_heads": 8,
+  "num_experts": 16,
+  "num_hidden_layers": 80,
+  "num_key_value_heads": 2,
+  "num_query_groups": 2,
+  "pad_token_id": 0,
+  "partial_rotary_factor": 0.5,
+  "residual_in_fp32": true,
+  "rope_parameters": {
+    "partial_rotary_factor": 0.5,
+    "rope_theta": 5000000,
+    "rope_type": "default"
+  },
+  "rope_theta": 5000000,
+  "scale_residual_merge": true,
+  "sliding_window": null,
+  "swa_layers": null,
+  "swa_rotary_base": null,
+  "transformers_version": "4.57.1",
+  "use_cache": true,
+  "vocab_size": 262272,
+  "zaya_high_prec": true,
+  "zaya_mlp_expansion": 256,
+  "zaya_use_eda": true,
+  "zaya_use_mod": true,
+  "quantization_config": {
+    "quant_method": "compressed-tensors",
+    "format": "pack-quantized",
+    "config_groups": {
+      "group_0": {
+        "weights": {
+          "num_bits": 4,
+          "type": "float",
+           "strategy": "group",
+           "group_size": 64,
+          "symmetric": true,
+          "dynamic": false,
+          "scale_dtype": "float8_e4m3fn"
+        },
+        "targets": [
+          "Linear"
+        ]
+      }
+    },
+    "ignore": [
+      "router"
+    ]
+  }
+}

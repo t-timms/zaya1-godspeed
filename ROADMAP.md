@@ -27,6 +27,20 @@ the Godspeed coding agent on consumer hardware (RTX 5070 Ti, 16 GB VRAM).
 
 ---
 
+## Phase 0 — Development Environment ✅
+
+**Goal**: SOTA development tooling — LSP, MCP, CUDA monitoring, pre-commit hooks.
+
+| Task | Status | Notes |
+|------|--------|-------|
+| opencode.json project config | ✅ | LSP (pyright), MCP (cuda-monitor, context7), 15 slash commands, formatter (ruff) |
+| CUDA monitoring MCP server | ✅ | `scripts/cuda_mcp_server.py` — 4 tools: gpu_status, vram_usage, cuda_version, gpu_clock |
+| Pre-commit hooks | ✅ | `.pre-commit-config.yaml` — ruff lint + format + pytest |
+| Type checker config | ✅ | `[tool.pyright]` in pyproject.toml — standard mode, py311 |
+| Auto-formatter | ✅ | ruff format on file write (opencode.json formatter config) |
+
+---
+
 ## Phase 1 — Compatibility Gate ✅
 
 **Goal**: Verify the Zyphra stack can load ZAYA1-8B and attach PEFT adapters.
@@ -58,7 +72,7 @@ the Godspeed coding agent on consumer hardware (RTX 5070 Ti, 16 GB VRAM).
 | MXFP4 quantized serving (Blackwell) | ❌ | OsaurusAI MXFP4 model: weight shape mismatch with Zyphra vLLM fork. |
 | NF4 path (transformers) | ❌ | Confirmed broken — bitsandbytes dequant incompatible with CCA attention. |
 | bitsandbytes (vLLM) | ❌ | ZayaForCausalLM lacks `packed_modules_mapping`. |
-| **NVFP4 Compressed-Tensors pipeline** | 🟡 | **Stage 1** (6-9 hrs): Quantize original BF16 → compressed-tensors NVFP4 via Marlin FP4 kernel. Publish first NVFP4 ZAYA1-8B benchmark. ~6.2 GB VRAM. **Stage 2** (24-37 hrs): Custom Blackwell NVFP4 Tensor Core CUDA kernel as Marlin drop-in replacement. ~4-5 GB VRAM, sm_120 hardware-accelerated. |
+| **NVFP4 Compressed-Tensors pipeline** | ✅ | **Stage 1 complete**: ZAYA1-8B quantized to NVFP4 via `NVFP4PackedCompressor` (6.62 GB, 1641 Linear modules, uint8 packed `[out, in//2]`, 20s). Gates 1-4 scripts built. 3 upstream patches applied (cca_num_q_heads, functools.partial, torch.compile removal). SOTA packaging: FP4 values packed 2-per-byte, float8 scales (saved as bfloat16 — safetensors CPU limit), symmetric zp removed. Output: `./zaya1-8b-nvfp4-ct/`. |
 | lainlives/ZAYA1-8B-GGUF audit | ✅ | Repo is empty (0 GGUF files, 0 bytes storage). README claims Q4_K/Q8_0/etc but none uploaded. Our NVFP4 GGUF is genuinely the first and only ZAYA1-8B GGUF. |
 | llama.cpp Zaya support | ❌ | No model implementation exists. `convert_hf_to_gguf.py` has no ZayaForCausalLM entry. llama.cpp cannot serve ZAYA1-8B — vLLM is the only viable inference engine. |
 
@@ -157,7 +171,7 @@ Unsloth/TRL — silent corruption otherwise.
 | Evaluate baseline checkpoint on 20-task suite | ⬜ | Primary metric: Jaccard + mech verify |
 | Full SFT on 300–500 verified trajectories | ⬜ | `WANDB_MODE=offline` on Windows |
 | Save LoRA adapter weights | ⬜ | |
-| GRPO Stage 2: policy improvement via verifiable rewards | ⬜ | 4–8 rollouts per prompt, mechanical verify as primary reward |
+| GRPO Stage 2: policy improvement via verifiable rewards | ⬜ | `scripts/train_grpo.py` built. `loss_type="dapo"`, `num_generations=4`, vLLM colocate. |
 | Merge adapter (optional, for vLLM deployment) | ⬜ | |
 
 **VRAM Budget (QLoRA, 16 GB GPU)**:

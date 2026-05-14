@@ -139,6 +139,7 @@ def _register_nvfp4_quantization() -> None:
 
             def get_supported_act_dtypes(self):
                 import torch
+
                 return [torch.float16, torch.bfloat16]
 
             @classmethod

@@ -14,23 +14,23 @@ class TestFormatZayaToolCall:
         result = rtz.format_zaya_tool_call("file_read", {"path": "src/main.py"})
         assert result.startswith("<zyphra_tool_call>")
         assert result.endswith("</zyphra_tool_call>")
-        inner = json.loads(result[len("<zyphra_tool_call>"): -len("</zyphra_tool_call>")])
+        inner = json.loads(result[len("<zyphra_tool_call>") : -len("</zyphra_tool_call>")])
         assert inner == {"name": "file_read", "arguments": {"path": "src/main.py"}}
 
     def test_empty_arguments(self):
         result = rtz.format_zaya_tool_call("noop", {})
-        inner = json.loads(result[len("<zyphra_tool_call>"): -len("</zyphra_tool_call>")])
+        inner = json.loads(result[len("<zyphra_tool_call>") : -len("</zyphra_tool_call>")])
         assert inner["arguments"] == {}
 
     def test_unicode_arguments(self):
         result = rtz.format_zaya_tool_call("search", {"query": "\u00fcber"})
-        inner = json.loads(result[len("<zyphra_tool_call>"): -len("</zyphra_tool_call>")])
+        inner = json.loads(result[len("<zyphra_tool_call>") : -len("</zyphra_tool_call>")])
         assert inner["arguments"]["query"] == "\u00fcber"
 
     def test_nested_arguments(self):
         args = {"filters": {"status": "active", "limit": 10}}
         result = rtz.format_zaya_tool_call("query", args)
-        inner = json.loads(result[len("<zyphra_tool_call>"): -len("</zyphra_tool_call>")])
+        inner = json.loads(result[len("<zyphra_tool_call>") : -len("</zyphra_tool_call>")])
         assert inner["arguments"] == args
 
 
@@ -71,14 +71,14 @@ class TestExtractToolCalls:
         assert calls == []
 
     def test_malformed_json(self):
-        content = '<zyphra_tool_call>not json</zyphra_tool_call>'
+        content = "<zyphra_tool_call>not json</zyphra_tool_call>"
         calls = rtz._extract_tool_calls_from_content(content)
         assert calls == []
 
     def test_mixed_valid_invalid(self):
         content = (
             '<zyphra_tool_call>{"name": "ok", "arguments": {}}</zyphra_tool_call>\n'
-            '<zyphra_tool_call>bad json</zyphra_tool_call>'
+            "<zyphra_tool_call>bad json</zyphra_tool_call>"
         )
         calls = rtz._extract_tool_calls_from_content(content)
         assert len(calls) == 1
@@ -165,20 +165,26 @@ class TestQualityGates:
 
     def test_tool_names_used(self):
         messages = [
-            {"role": "assistant", "content": (
-                '<zyphra_tool_call>{"name":"file_read","arguments":{}}</zyphra_tool_call>\n'
-                '<zyphra_tool_call>{"name":"grep_search","arguments":{}}</zyphra_tool_call>'
-            )},
+            {
+                "role": "assistant",
+                "content": (
+                    '<zyphra_tool_call>{"name":"file_read","arguments":{}}</zyphra_tool_call>\n'
+                    '<zyphra_tool_call>{"name":"grep_search","arguments":{}}</zyphra_tool_call>'
+                ),
+            },
         ]
         names = rtz._tool_names_used(messages)
         assert names == {"file_read", "grep_search"}
 
     def test_tool_names_used_malformed_skipped(self):
         messages = [
-            {"role": "assistant", "content": (
-                '<zyphra_tool_call>{"name":"ok","arguments":{}}</zyphra_tool_call>\n'
-                '<zyphra_tool_call>bad</zyphra_tool_call>'
-            )},
+            {
+                "role": "assistant",
+                "content": (
+                    '<zyphra_tool_call>{"name":"ok","arguments":{}}</zyphra_tool_call>\n'
+                    "<zyphra_tool_call>bad</zyphra_tool_call>"
+                ),
+            },
         ]
         names = rtz._tool_names_used(messages)
         assert names == {"ok"}

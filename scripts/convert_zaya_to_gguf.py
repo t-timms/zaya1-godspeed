@@ -79,11 +79,13 @@ def shorten_name(name: str) -> str:
 
 def main() -> None:
     import argparse
+
     parser = argparse.ArgumentParser(description="Convert ZAYA1-8B to GGUF")
     parser.add_argument("--output", default="/tmp/zaya1-8b-f16.gguf")
     parser.add_argument("--model-id", default="Zyphra/ZAYA1-8B")
     parser.add_argument(
-        "--arch", default="zaya",
+        "--arch",
+        default="zaya",
         help="GGUF architecture (use llama for llama.cpp quantize compat)",
     )
     args = parser.parse_args()

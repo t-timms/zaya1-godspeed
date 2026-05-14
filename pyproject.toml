@@ -21,6 +21,7 @@ dev = [
     "ruff>=0.8.0",
     "pytest>=8.0.0",
     "pytest-cov>=6.0.0",
+    "mcp>=1.27.1",
 ]
 inference = [
     "vllm @ git+https://github.com/Zyphra/vllm.git@zaya1-pr",
@@ -39,6 +40,17 @@ select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportPrivateUsage = false
 
 [tool.coverage.report]
 omit = ["tests/*"]

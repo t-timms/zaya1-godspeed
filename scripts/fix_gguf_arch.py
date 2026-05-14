@@ -35,7 +35,7 @@ def fix_gguf_arch(input_path: str, new_arch: str) -> None:
         rewritten_key = key
         for old_prefix in ("llama.", "zaya."):
             if key.startswith(old_prefix):
-                rewritten_key = f"{new_arch}.{key[len(old_prefix):]}"
+                rewritten_key = f"{new_arch}.{key[len(old_prefix) :]}"
                 break
 
         if rewritten_key in arch_keys_seen:

@@ -93,20 +93,31 @@ Three paths evaluated for serving the 4.76 GB NVFP4 GGUF:
 
 **Decision**: Two-stage pipeline. Stage 1: Compressed-tensors + Path A Python dequant for first benchmark (coherent text achieved May 14 session 2). Stage 2: Custom Blackwell CUDA kernel for hardware-accelerated dequant.
 
-### Stage 2 — Blackwell NVFP4 Tensor Core CUDA Kernel ⬜
+### Stage 2 — CUTLASS SM120 NVFP4 Tensor Core Kernel 🟡
 
-**Goal**: Replace Path A Python dequant with a hardware-accelerated Blackwell sm_120 kernel.
+**Goal**: Replace Path A Python dequant with NVIDIA's CUTLASS SM120 BlockScaledTensorOp kernels.
+
+**Architecture discovery (May 14, 2026, session 3)**:
+Consumer Blackwell (SM120/RTX 5070 Ti) uses an **extended `mma.sync.aligned.kind::f8f6f4`** instruction (Ampere-era warp-level programming model), NOT `tcgen05` (datacenter-only, requires TMEM) and NOT `wgmma` (Hopper-era, deprecated). SM120 has no TMEM — accumulators stay in registers. FP4/FP6 tensor core support IS present but with the older programming model. vLLM source at `/home/ttimm/vllm-src/` (v0.20.2) already contains CUTLASS SM120 FP4 kernels that were NOT compiled into the pre-built wheel.
+
+**Key source files** (all in `/home/ttimm/vllm-src/csrc/`):
+- `libtorch_stable/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu` — `cutlass_scaled_fp4_mm_sm120a`: FP4×FP4 GEMM via CUTLASS Sm120 BlockScaledTensorOp. Outputs bf16 or fp16.
+- `libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu` — `cutlass_fp4_group_mm`: Grouped MoE GEMM with SM120 dispatch via `run_fp4_blockwise_scaled_group_mm_sm120`. Both A and B are FP4 with `float_ue4m3_t` scales.
+- `quantization/marlin/marlin.cu` — Marlin kernel (works on sm_120 for Linear but corrupts MoE scales)
+- `moe/marlin_moe_wna16/ops.cu` — Marlin MoE kernel (weight-only FP4, dequantizes weights on the fly)
+
+**Approach**: Rebuild vLLM from source with `ENABLE_NVFP4_SM120=ON` + CUTLASS 3.8+, then wire `cutlass_fp4_group_mm` into the NVFP4 MoE dispatch. Uses NVIDIA's own optimized SM120 kernels — no custom CUDA code required.
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Profile Path A bottleneck per layer | ⬜ | Measure dequant time vs matmul time per MoE layer. Current ~0.86 tok/s end-to-end. |
-| Write FP4 → bf16 dequant CUDA kernel (sm_120) | ⬜ | Match Marlin's API surface; consume `weight_packed` (uint8) + `weight_scale` (fp8_e4m3) → output bf16. |
-| Wire MMA into MoE apply() — fused dequant + GEMM | ⬜ | Use Blackwell `wgmma` / `tcgen05` instructions for FP4 Tensor Core MMA. |
-| Register as vLLM quantization method | ⬜ | Drop-in replacement for both Marlin Linear and Path A MoE. |
-| Eliminate Python dequant fallback for CCA attention | ⬜ | CCA attention dimensions are tile-aligned; same kernel works there too. |
-| Drop the bf16-required inference contract | ⬜ | Higher-precision Tensor Core accumulation should let fp16 work. |
-| Benchmark Stage 2 vs Stage 1 (target: >10× speedup) | ⬜ | Same quality (deterministic dequant math); measure tokens/sec. |
-| Submit upstream PR to vLLM | ⬜ | Reusable across all NVFP4 CT models, not just Zaya. |
+| Set up CUDA LSP (clangd + compile_commands.json) | 🟡 | clangd install pending (WSL apt-get timeout). vLLM source cloned. |
+| Rebuild vLLM from source with SM120 CUTLASS support | ⬜ | Requires `ENABLE_NVFP4_SM120=ON`, CUTLASS 3.8+, CUDA 13.2. |
+| Wire `cutlass_fp4_group_mm` into MoE `apply()` | ⬜ | Activate dynamic FP4 activation quantization path. |
+| Verify scale format compatibility (signed E4M3 → unsigned E4M3) | ⬜ | Our checkpoint scales are non-negative; casting should be a no-op. |
+| Wire `cutlass_scaled_fp4_mm_sm120a` for CCA attention Linear layers | ⬜ | Replace Python dequant fallback for CCA projections. |
+| Drop the bf16-required inference contract | ⬜ | CUTLASS kernel performs accumulation in fp32 internally. |
+| Benchmark Stage 2 vs Stage 1 (target: >10× speedup) | ⬜ | Deterministic dequant math → identical output quality. |
+| Submit upstream PR to vLLM | ⬜ | SM120 support is already in vLLM source — PR fixes the build flags + MoE wiring. |
 
 **Key technical findings from GGUF loading attempts**:
 - vLLM's GGUF handler lacks NVFP4 tensor type support; requires adding to DEQUANT_TYPES + Python dequant fallback

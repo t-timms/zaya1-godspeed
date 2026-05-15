@@ -48,6 +48,10 @@ credentials.json
 # W&B
 wandb/
 
+# Quantized model directories
+zaya1-8b-nvfp4-ct/
+zaya1-8b-nvfp4-ct-gs16/
+
 # Training outputs
 checkpoints/
 runs/

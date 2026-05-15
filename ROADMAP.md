@@ -58,7 +58,7 @@ the Godspeed coding agent on consumer hardware (RTX 5070 Ti, 16 GB VRAM).
 
 ---
 
-## Phase 2 — Inference Pipeline 🟡
+## Phase 2 — Inference Pipeline ✅
 
 **Goal**: Serve ZAYA1-8B via an OpenAI-compatible endpoint at usable speed.
 
@@ -72,7 +72,9 @@ the Godspeed coding agent on consumer hardware (RTX 5070 Ti, 16 GB VRAM).
 | MXFP4 quantized serving (Blackwell) | ❌ | OsaurusAI MXFP4 model: weight shape mismatch with Zyphra vLLM fork. |
 | NF4 path (transformers) | ❌ | Confirmed broken — bitsandbytes dequant incompatible with CCA attention. |
 | bitsandbytes (vLLM) | ❌ | ZayaForCausalLM lacks `packed_modules_mapping`. |
-| **NVFP4 Compressed-Tensors pipeline** | ✅ | **Stage 1 complete**: ZAYA1-8B quantized to NVFP4 via `NVFP4PackedCompressor` (6.62 GB, 1641 Linear modules, uint8 packed `[out, in//2]`, 20s). Gates 1-4 scripts built. 3 upstream patches applied (cca_num_q_heads, functools.partial, torch.compile removal). SOTA packaging: FP4 values packed 2-per-byte, float8 scales (saved as bfloat16 — safetensors CPU limit), symmetric zp removed. Output: `./zaya1-8b-nvfp4-ct/`. |
+| **NVFP4 Compressed-Tensors quantization** | ✅ | ZAYA1-8B quantized to NVFP4 via `NVFP4PackedCompressor` (`zaya1-8b-nvfp4-ct-gs16/`, 5.04 GB, group_size=16, 1641 Linear modules, uint8 packed `[out, in//2]`, ~20s). FP4 values packed 2-per-byte, FP8_E4M3 scales, no global scales (per-group only), symmetric zero-point removed. |
+| **NVFP4 CT loads via vLLM** | ✅ | May 14 session 1. All 4,244 weights mapped + initialized, 5.53 GiB VRAM, smoke test exit 0. 2 patches: scale routing + Marlin group_size fallback. |
+| **NVFP4 CT generates coherent text** | ✅ | **May 14 session 2** — `"The capital of France is"` → `" Paris."`; coherent BST explanation. Required 3 additional patches (`wsl_fix_nvfp4_text_gen.py`): split combined w13 packed+scale into gate/up halves on load, dequant tied NVFP4 lm_head into embed_tokens.weight, rewrite MoE method for Path A on-the-fly Python dequant. Throughput: ~0.86 tok/s on RTX 5070 Ti (16 GB Blackwell sm_120). **Inference contract: `dtype="bfloat16"` required** — fp16 collapses output to a repeated token. |
 | lainlives/ZAYA1-8B-GGUF audit | ✅ | Repo is empty (0 GGUF files, 0 bytes storage). README claims Q4_K/Q8_0/etc but none uploaded. Our NVFP4 GGUF is genuinely the first and only ZAYA1-8B GGUF. |
 | llama.cpp Zaya support | ❌ | No model implementation exists. `convert_hf_to_gguf.py` has no ZayaForCausalLM entry. llama.cpp cannot serve ZAYA1-8B — vLLM is the only viable inference engine. |
 
@@ -89,7 +91,22 @@ Three paths evaluated for serving the 4.76 GB NVFP4 GGUF:
 | Original → Compressed-tensors | 4-5 GB | Marlin FP4 | Fast | **Chosen for Stage 1** — avoids double quantization |
 | Custom Blackwell CUDA kernel | 4-5 GB | NVFP4 Tensor Core MMA | Fastest | **Stage 2** — reusable across all models, open-source contribution |
 
-**Decision**: Two-stage pipeline. Stage 1: Compressed-tensors + Marlin FP4 for first benchmark. Stage 2: Custom CUDA kernel for Blackwell-specific acceleration.
+**Decision**: Two-stage pipeline. Stage 1: Compressed-tensors + Path A Python dequant for first benchmark (coherent text achieved May 14 session 2). Stage 2: Custom Blackwell CUDA kernel for hardware-accelerated dequant.
+
+### Stage 2 — Blackwell NVFP4 Tensor Core CUDA Kernel ⬜
+
+**Goal**: Replace Path A Python dequant with a hardware-accelerated Blackwell sm_120 kernel.
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Profile Path A bottleneck per layer | ⬜ | Measure dequant time vs matmul time per MoE layer. Current ~0.86 tok/s end-to-end. |
+| Write FP4 → bf16 dequant CUDA kernel (sm_120) | ⬜ | Match Marlin's API surface; consume `weight_packed` (uint8) + `weight_scale` (fp8_e4m3) → output bf16. |
+| Wire MMA into MoE apply() — fused dequant + GEMM | ⬜ | Use Blackwell `wgmma` / `tcgen05` instructions for FP4 Tensor Core MMA. |
+| Register as vLLM quantization method | ⬜ | Drop-in replacement for both Marlin Linear and Path A MoE. |
+| Eliminate Python dequant fallback for CCA attention | ⬜ | CCA attention dimensions are tile-aligned; same kernel works there too. |
+| Drop the bf16-required inference contract | ⬜ | Higher-precision Tensor Core accumulation should let fp16 work. |
+| Benchmark Stage 2 vs Stage 1 (target: >10× speedup) | ⬜ | Same quality (deterministic dequant math); measure tokens/sec. |
+| Submit upstream PR to vLLM | ⬜ | Reusable across all NVFP4 CT models, not just Zaya. |
 
 **Key technical findings from GGUF loading attempts**:
 - vLLM's GGUF handler lacks NVFP4 tensor type support; requires adding to DEQUANT_TYPES + Python dequant fallback

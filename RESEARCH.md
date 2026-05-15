@@ -3,7 +3,7 @@
 **Project**: zaya1-godspeed  
 **Experiment Lead**: Tremayne Timms  
 **Date**: May 12, 2026  
-**Status**: Phase 2 Stage 1 COMPLETE (May 14, 2026). NVFP4 Compressed-Tensors ZAYA1-8B loads and initializes successfully via vLLM — all 4,244 weights loaded, 5.51 GiB VRAM, smoke test exit 0. Two vLLM patches applied. Stage 2 (custom Blackwell CUDA kernel) next.
+**Status**: Phase 2 Stage 1 COMPLETE — coherent text generation (May 14, 2026, session 2). NVFP4 Compressed-Tensors ZAYA1-8B serves correctly via vLLM on RTX 5070 Ti (Blackwell sm_120). Greedy decoding answers "The capital of France is" → " Paris." and produces coherent BST reasoning. All 4,244 weights load; ~5.5 GiB VRAM; ~0.86–0.90 tok/s on Path A (on-the-fly Python dequant). Five upstream vLLM/Zaya fixes applied. Stage 2 (custom Blackwell NVFP4 Tensor Core CUDA kernel) is next for speed.
 
 ---
 
@@ -285,7 +285,7 @@ This causes small tensors (CCA convolution kernels, biases, scalars) to remain i
 | OsaurusAI/ZAYA1-8B-MXFP4 | MXFP4 | ~5.5 GB | ⚠️ | ❌ (weight shape mismatch) |
 | lainlives/ZAYA1-8B-GGUF | Q4_K/Q8_0 | N/A | ❌ | ❌ (empty repo, 0 files uploaded) |
 | **Our NVFP4 GGUF** | **NVFP4** | **4.76 GB** | **✅ Native** | **GGUF handler incompatible** |
-| **Our NVFP4 CT (Stage 1)** | **NVFP4** | **~4.5 GB disk** | ⚠️ (Marlin, not MMA) | **✅ Achieved (May 14)** |
+| **Our NVFP4 CT (Stage 1)** | **NVFP4** | **5.04 GB disk** | ⚠️ (Python dequant for MoE, Marlin for CCA) | **✅ Coherent text (May 14 session 2)** |
 | **Our NVFP4 CUDA (Stage 2)** | **NVFP4** | **~4.5 GB disk** | **✅ Tensor Core MMA** | **Planned** |
 
 ### 5.9 Compressed-Tensors Serving — First Achievement (May 14, 2026)
@@ -402,6 +402,135 @@ bash scripts/wsl_run_smoke.sh
 ```
 
 **Note**: These fixes modify files inside the WSL vLLM Python installation at `/home/ttimm/vllm-env/lib/python3.12/site-packages/vllm/`. The fix scripts are idempotent — they check for existing patches before applying. Re-running after a vLLM reinstall is safe.
+
+### 5.10 Coherent Text Generation — Second Achievement (May 14, 2026, session 2)
+
+**This is the first successful coherent text generation from a NVFP4 Compressed-Tensors ZAYA1-8B on Blackwell hardware.** With the smoke test from §5.9 passing, the model was *initialized* but every prompt produced 120 consecutive pad tokens (token id 0). Three additional bugs were diagnosed and fixed; together they unlocked the model. Greedy decoding now answers "The capital of France is" → " Paris. London is the capital of the UK. Tokyo is the capital of Japan..." and explains binary search trees coherently. Performance: **~0.86–0.90 tok/s** end-to-end with Path A (on-the-fly Python dequant), bottlenecked by the per-layer dequant loop over 16 experts. The MoE Marlin kernel is bypassed entirely on this path because `nvfp4_marlin_process_scales` produces negative-valued scales for this checkpoint via the FP8→S0E5M3 conversion at `marlin_utils_fp4.py` lines 108–112 (confirmed: the checkpoint's stored scales are strictly non-negative).
+
+These bugs are not Zaya-specific. They are general vLLM CompressedTensors and `FusedMoE.weight_loader` issues that surface only when (a) checkpoint weights are stored per-expert with combined gate+up rows and packed FP4 dtype, and (b) lm_head is NVFP4 with tied embeddings. The fixes are upstreamable to vLLM.
+
+#### 5.10.1 Root Cause 3: `_load_w13` narrows combined-shard packed weights to gate-half
+
+**Symptom**: After §5.9 fixes, model loads "4,244/4,244 weights" and `process_weights_after_loading` completes for all 40 MoE layers. Apply diagnostics in the first MoE layer show valid inputs (`x` mean abs 0.638, range [-2.42, 9.04]) and valid dequantized w13 (mean abs 0.010, range [-0.84, 0.61]) but `out` is identically zero. The next MoE layer's dequant produces NaN-valued w13, and NaN cascades through the remaining 39 layers. Final logits collapse to argmax=0 → pad token output regardless of input prompt.
+
+**Debugging methodology**: A one-shot diagnostic in `apply()` logged `(x, w13_fp, topk_weights, topk_ids, out)` summary statistics on the first call per layer. The first MoE layer showed `topk_ids=[4,4,...4]` (every warmup token routed to expert 4), reasonable scales, and reasonable dequantized weights — yet `out` was identically zero. Switching the apply implementation from `fused_experts` (vLLM's Triton MoE kernel) to a manual per-token loop produced the same zero output: the bug was *not* in the dispatcher. A second diagnostic inside `process_weights_after_loading` split `layer.w13_weight` and `layer.w13_weight_scale` into gate-half (rows `[:N]`) and up-half (rows `[N:]`) and reported per-half statistics. Result:
+
+```
+gate_nz=33,513,898/33,554,432  up_nz=33,513,386/33,554,432
+gate_scale_min=0.00195  gate_scale_max=0.14063
+up_scale_min=0.0        up_scale_max=0.0          ← entire up half is zero
+```
+
+The packed weight bytes for the up half were nonzero (random uint8 patterns from `torch.empty`), but the *scales* for the up half were all zeros. Dequant of nonzero FP4 weights with zero scales produces identically zero output — explaining `out=0` for the first MoE layer where every token routes to one expert.
+
+The downstream NaN cascade comes from the same uninitialized memory in subsequent layers: for layers where the up-half packed bytes happen to decode to bit patterns adjacent to FP4 special values, downstream attention sees a single NaN and propagates it.
+
+**Root Cause**: `FusedMoE._load_w13` at `vllm/model_executor/layers/fused_moe/layer.py:943` narrows the loaded tensor to `expert_data.shape[shard_dim] // 2` rows when `is_act_and_mul=True` (lines 954–955), then narrows the target `expert_data` to the gate half for `shard_id="w1"` (lines 974–975). This is correct *if* the caller is loading a single half. But `zaya.py` passed the full combined `[2*N, K//2]` checkpoint tensor with `shard_id="w1"`, expecting all `2*N` rows to be copied — the narrowing silently dropped the up half. The packed-weight path in `zaya.py` (added in session 1) used `shard_id="w1"` directly on the combined tensor, so up rows of every expert in every MoE layer remained at their `torch.empty` initialization values.
+
+For the *scales*, there is a parallel "combined" fast-path at `fused_moe/layer.py:1298` that detects when `loaded_weight.shape[-2] == param.data.shape[-2]` and bypasses narrowing via `_load_combined_w13_weight_scale`. That fast-path is gated on `if "ModelOpt" in quant_method_name` (line 1260). For CompressedTensors, the fast-path is skipped; scale loading falls through to `_load_model_weight_or_group_weight_scale` → `_load_w13` → the same narrowing → up scales never load → stays at `torch.empty` (which happens to read zero on this allocator on this run, but is undefined in general).
+
+**Fix** (`scripts/wsl_fix_nvfp4_text_gen.py`, fix #1+#2): In `ZayaForCausalLM.load_weights`, split *both* `linear_fc1.weight_packed` and `linear_fc1.weight_scale` into `loaded_weight[:half, :]` (gate) and `loaded_weight[half:, :]` (up), and call `fused_moe_module.weight_loader` twice — once with `shard_id="w1"` for gate, once with `shard_id="w3"` for up. After this, `_load_w13`'s narrowing operates on the correct half-tensor and produces the correct layout. Both halves of `w13_weight_packed` and `w13_weight_scale` carry the checkpoint's data with no uninitialized rows.
+
+**Why this wasn't caught earlier**: Stage 1's smoke test (§5.9.4) only checked weight *count* (4,244/4,244 weights loaded) and exit code. It did not verify weight *content*. A "weight loaded" log entry fires when `weight_loader` returns successfully — it has no way to detect that the loader silently dropped half the tensor.
+
+#### 5.10.2 Root Cause 4: NVFP4 lm_head silently dropped under tied embeddings
+
+**Symptom**: After fix #3 (w13 split), `apply()` diagnostics show reasonable values through every MoE layer (no NaN, magnitudes in expected ranges) — yet greedy decoding still emits pad tokens (id 0) for every prompt. Sampling with temperature=0.8 produces *varied* but still semantically random tokens. The forward pass is computing correctly but the final lm_head projection produces logits that argmax to pad.
+
+**Debugging methodology**: A diagnostic added at the end of `ZayaForCausalLM.load_weights` reported the post-load statistics of `self.model.embed_tokens.weight`: shape `(262272, 2048)`, dtype `torch.float16`, `abs_mean=0.000` — values were not loaded at all (zero or torch.empty noise). Inspection of the checkpoint showed `lm_head.weight_packed` (uint8) and `lm_head.weight_scale` (fp8) keys but no `lm_head.weight` and no `model.embed_tokens.weight`. The Zaya config has `tie_word_embeddings=True` (HF default when unset) and `zaya_high_prec=True`. zaya.py constructs `self.lm_head = ParallelLMHead(..., quant_config=None, ...)` and then calls `self.lm_head.tie_weights(self.model.embed_tokens)`, so the shared parameter is registered under the embed_tokens name only. The default load loop in `zaya.py` matched `chkpt_weight_name` against `params_dict` by exact string and silently skipped both NVFP4 keys.
+
+The skip was masked by a broken log line at `zaya.py:1037`:
+```python
+logger.info("WARNING: key {chkpt_weight_name} not in params! Skipping loading")
+```
+The `f` prefix is missing — Python logs the literal string `"WARNING: key {chkpt_weight_name} not in params!"` for every skip, so the actual keys never appeared in stderr. Fixing the format string to `logger.info("WARNING: key %s not in params! Skipping loading", chkpt_weight_name)` revealed `lm_head.weight_packed` / `lm_head.weight_scale` as the silently-dropped keys.
+
+**Root Cause**: `ParallelLMHead(quant_config=None)` creates an *unquantized* lm_head layer that registers a single `weight` Parameter (fp16). With `tie_word_embeddings=True`, `tie_weights` rebinds the lm_head to share `model.embed_tokens.weight`. The Zaya `zaya_high_prec=True` path then attaches a custom `_FP32EmbeddingMethod` that calls `torch.mm(x, layer.weight.t(), out_dtype=torch.float32)` — it reads `layer.weight` directly and never goes through any quantization scheme. There is no code path that dequantizes the NVFP4 lm_head from the checkpoint into this fp16 Parameter.
+
+**Fix** (`scripts/wsl_fix_nvfp4_text_gen.py`, fix #2): In `ZayaForCausalLM.load_weights`, buffer `lm_head.weight_packed` and `lm_head.weight_scale` during the load loop (do not pass them to `weight_loader`). After the loop completes, dequantize via `compressed_tensors.compressors.nvfp4.helpers.unpack_fp4_from_uint8` + `compressed_tensors.quantization.lifecycle.forward.dequantize` to a fp32 tensor, cast to the target dtype, and copy into `params_dict["model.embed_tokens.weight"]` (the canonical name under tied embeddings) or `params_dict["lm_head.weight"]` as a fallback. Also fix the broken log line so future loader skips are diagnosable.
+
+**Why this wasn't caught earlier**: The session-1 smoke test verified the model *initialized*. Initialization does not exercise the lm_head — that only fires during the final projection per generation step. Combined with the broken log line hiding the skip, there was no signal until end-to-end generation was attempted.
+
+#### 5.10.3 Root Cause 5: Marlin MoE scale corruption + emulation backend device mismatch
+
+**Symptom**: When attempting to keep the Marlin MoE backend after fix #3+#4, generation produces all pad tokens despite valid forward pass logging. Falling back to the NVFP4 emulation MoE backend crashes with `RuntimeError: Expected all tensors to be on the same device` (kE2M1 lookup table on CPU, input tensors on CUDA).
+
+**Root Cause**: `nvfp4_marlin_process_scales` (in `marlin_utils_fp4.py` lines 108–112) reinterprets the loaded FP8_E4M3 scale tensor through a FP8 → S0E5M3 bit-level conversion designed for the Marlin kernel's internal scale format. For this checkpoint, the conversion introduces negative-signed values for scales that are strictly non-negative in the source data (verified by direct inspection: `weight_scale.float().min() = 0.00195` across all MoE layers, with no negative values). The Marlin kernel then multiplies dequantized values by these mis-signed scales, producing flipped-sign outputs that corrupt the SwiGLU result.
+
+The emulation backend (`Nvfp4QuantizationEmulationTritonExperts`) bypasses Marlin entirely but contains a device-placement bug exposed under WSL: `kE2M1` is initialized at module import time on CPU, and the experts class never moves it to the input device before the unpack step.
+
+**Fix** (`scripts/wsl_fix_nvfp4_text_gen.py`, fix #3 — "Path A"): Rewrite `CompressedTensorsW4A4Nvfp4MoEMethod.apply()` and `process_weights_after_loading()` to bypass both Marlin and emulation. Keep packed FP4 weights (`layer.w13_weight`, `layer.w2_weight`) and per-group scales (`self._w13_scale`, `self._w2_scale`) at original layout, cloned to decouple from any downstream Marlin-prep that might mutate them in place. In `apply()`, dequantize on the fly per call using the same `unpack_fp4_from_uint8` + `dequantize` primitives that the Linear NVFP4 Python-dequant fallback uses (and that produce correct CCA attention output). Execute the MoE dispatch with a manual per-expert loop:
+
+```python
+for e_id in range(E):
+    mask = (topk_ids == e_id)
+    token_idx = mask.any(dim=-1).nonzero(as_tuple=True)[0]
+    if token_idx.numel() == 0:
+        continue
+    xe = x[token_idx]
+    gate_up = F.linear(xe, w13_fp[e_id])              # [t_e, 2N]
+    gate, up = gate_up[..., :N], gate_up[..., N:]
+    hidden = F.silu(gate) * up                        # vLLM SiluAndMul convention
+    down = F.linear(hidden, w2_fp[e_id])              # [t_e, K]
+    tw = ((topk_ids[token_idx] == e_id).to(x.dtype)
+          * topk_weights[token_idx].to(x.dtype)).sum(dim=-1, keepdim=True)
+    out[token_idx] += tw * down
+```
+
+`fused_experts` was tried first but produced zero output for constant-routed warmup batches without a cached Triton config for sm_120; the autotuner appears to mis-tune when every token routes to the same expert. The manual loop is slower but correct and produces deterministic output across both warmup and real decode.
+
+**Why this wasn't caught earlier**: The Marlin MoE corruption only manifests through end-to-end inference; the kernel itself does not error, it silently produces sign-flipped outputs. The emulation backend works on Linux native CUDA installs where module-level CPU tensors get auto-moved by `.to(device)` calls inside the experts class — but the WSL CUDA installation has a different module-import order that leaves `kE2M1` on CPU at the time of first use.
+
+#### 5.10.4 Inference Contract: bfloat16 required
+
+`dtype="bfloat16"` in the vLLM `LLM(...)` constructor is **required**, not optional, for this serving path. `dtype="float16"` produces collapsed output where greedy decoding selects the same token at every step (observed: token 27269 = ` Investment` repeated for 40+ steps from the prompt "The capital of France is"). The accumulation precision in the Path A Python MoE dequant loop is insufficient at fp16; bf16's larger exponent range avoids the saturation that drives the model to a single attractor in fp16.
+
+This is a property of the dequant *path*, not the model. The Marlin MoE kernel and a future Blackwell NVFP4 Tensor Core kernel both perform accumulation in higher precision internally and should work in fp16 once available.
+
+#### 5.10.5 Smoke Test Results (May 14, 2026, session 2)
+
+```
+Loading weights: 100%|██████████| 4.24k/4.24k [00:11<00:00, 358weights/s]
+Model loading took 5.53 GiB memory and 16.07 seconds
+Available KV cache memory: 8.42 GiB
+GPU KV cache size: 218,993 tokens
+
+--- RAW completion ---
+Prompt: "The capital of France is"
+Token IDs: [9079, 236761, 5860, 563, 506, 5279, 529, 506, 6322, 236761, ...]
+Text: " Paris. London is the capital of the UK. Tokyo is the capital of Japan.
+       London is in the United Kingdom. Tokyo is in Japan. London is closer to
+       Tokyo than to the UK. London"
+Output speed: 0.86 toks/s, max_tokens=40
+
+--- CHAT completion ---
+Prompt: "Explain what a binary search tree is in one sentence."
+Text: "We are asked: Explain what a binary search tree is in one sentence.
+
+       Alright, I need to explain a binary search tree in one sentence.
+       Let's recall the definition: a binary search tree is a rooted tree..."
+Output speed: 0.90 toks/s, max_tokens=120
+```
+
+The model produces correct factual responses ("The capital of France is" → " Paris.") and coherent reasoning chains. Output speed is dominated by the per-layer Python dequant loop (16 experts × 2 projections per layer × 40 MoE layers = 1,280 dequant ops per token). Stage 2 (Blackwell NVFP4 Tensor Core CUDA kernel) replaces this with hardware-accelerated MMA, projecting >10× speedup.
+
+#### 5.10.6 Reproduction
+
+```bash
+# Environment
+source /home/ttimm/vllm-env/bin/activate
+export PATH=/usr/local/cuda/bin:$PATH
+
+# Apply fixes (order matters — session 1 first, then session 2)
+python3 scripts/wsl_fix_moe_scale_routing.py       # session 1: scale routing
+python3 scripts/wsl_fix_marlin_group_size.py       # session 1: gs fallback
+python3 scripts/wsl_fix_nvfp4_text_gen.py          # session 2: 3 fixes
+
+# Smoke test (must use dtype="bfloat16")
+bash scripts/wsl_run_quick_check.sh
+```
+
+Expected output: " Paris..." for the raw prompt, coherent BST explanation for the chat prompt. If the model produces all pad tokens (id 0), one of the three session-2 fixes did not apply cleanly — run the patch script with verbose flags or inspect the WSL vllm-env files directly.
 
 ### 6.1 Audited Repositories
 
@@ -550,27 +679,33 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 
 ---
 
-## 12. Next Steps (Updated May 14, 2026)
+## 12. Next Steps (Updated May 14, 2026, session 2)
 
 ### ✅ Complete: NVFP4 Compressed-Tensors Pipeline (Stage 1)
-1. ✅ **Quantized original ZAYA1-8B** → compressed-tensors NVFP4 format using `compressed_tensors` library
+1. ✅ **Quantized original ZAYA1-8B** → compressed-tensors NVFP4 format (`zaya1-8b-nvfp4-ct-gs16`, group_size=16, 5.04 GB)
 2. ✅ **Saved as safetensors** + `config.json` with `"quant_method": "compressed-tensors"` and weight-only group quantization
-3. ✅ **Serve via vLLM**: Model loads successfully — 4,244/4,244 weights, 5.51 GiB VRAM, smoke test exit 0
-4. ✅ **Two vLLM patches applied**: Scale routing fix, Marlin group_size fallback fix
-5. ⏳ **Benchmark**: `lm_eval` against AIME'26 (89.1), GPQA-Diamond (71.0), MMLU-Pro (74.2), LiveCodeBench (65.8)
-6. ⏳ **Publish**: HuggingFace model card with NVFP4 benchmark scores, compressed-tensors format
+3. ✅ **Serve via vLLM**: Model loads — 4,244/4,244 weights, 5.53 GiB VRAM
+4. ✅ **Generate coherent text**: "The capital of France is" → " Paris.", BST explanation coherent (greedy, bf16)
+5. ✅ **Five vLLM/Zaya patches applied** (idempotent scripts in `scripts/wsl_fix_*.py`):
+   1. `wsl_fix_moe_scale_routing.py` — Route `weight_scale` checkpoint keys to scale params, not weight params
+   2. `wsl_fix_marlin_group_size.py` — Skip Marlin Linear repack for unsupported group sizes, fall back to Python dequant
+   3. `wsl_fix_nvfp4_text_gen.py` fix #1+#2 — Split combined `linear_fc1.weight_packed` AND `linear_fc1.weight_scale` into gate (`w1`) and up (`w3`) halves on load (the `_load_w13` narrowing bug)
+   4. `wsl_fix_nvfp4_text_gen.py` fix #2 — Dequantize NVFP4 `lm_head.weight_packed` + `lm_head.weight_scale` and bind into tied `model.embed_tokens.weight` (default loader silently skipped both keys; broken log f-string hid the skip)
+   5. `wsl_fix_nvfp4_text_gen.py` fix #3 — Rewrite `CompressedTensorsW4A4Nvfp4MoEMethod.apply()` for Path A on-the-fly Python dequant + manual per-expert SwiGLU loop, bypassing Marlin MoE (which corrupts scales for this checkpoint via FP8→S0E5M3 sign-flip) and the WSL-device-mismatched emulation backend
 
-### Immediate: Text Generation Verification
-- Run a simple text generation through the loaded model to verify output quality
-- Compare against FP8 baseline on known prompts
-- Profile Python dequant performance on CCA attention layers
+### Immediate: Benchmarking & Publication
+- Run `lm_eval` against AIME'26 (89.1 baseline), GPQA-Diamond (71.0), MMLU-Pro (74.2), LiveCodeBench (65.8)
+- Compare against FP8 baseline on the same prompts to measure quality drop from NVFP4
+- Publish HuggingFace model card with NVFP4 benchmark scores
+- Write up the five-fix story as a vLLM contribution / blog post
 
 ### Follow-on: Blackwell CUDA Kernel (Stage 2)
 1. **Write custom CUDA kernel** for Blackwell NVFP4 Tensor Core MMA dequant (sm_120)
-2. **Register as vLLM quantization method** — drop-in replacement for Marlin FP4
-3. **Submit upstream PR** to vLLM — reusable across all models
-4. **Re-benchmark** with hardware-accelerated kernel (~4-5 GB VRAM)
-5. **Eliminate Python dequant fallback** — bring CCA attention layers onto the native kernel
+2. **Register as vLLM quantization method** — drop-in replacement for Marlin FP4 *and* the Path A Python dequant
+3. **Submit upstream PR** to vLLM — reusable across all NVFP4 CT models
+4. **Re-benchmark** with hardware-accelerated kernel — projecting >10× speedup over the current 0.86 tok/s on the manual loop
+5. **Eliminate Python dequant fallback** entirely — both MoE and CCA attention onto the native kernel
+6. **Drop the bf16-required inference contract** — once accumulation happens in higher-precision Tensor Core registers, fp16 should work
 
 ### Phase 3-7 (unchanged)
 - Phase 3: NVIDIA NIM credentials, Godspeed headless teacher trajectories

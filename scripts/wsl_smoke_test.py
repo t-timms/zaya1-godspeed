@@ -11,7 +11,7 @@ import sys
 
 
 def main() -> int:
-    MODEL_DIR = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-ct"
+    MODEL_DIR = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-ct-gs16"
 
     print(f"Loading model from: {MODEL_DIR}")
     print(f"Model exists: {os.path.isdir(MODEL_DIR)}")

@@ -95,7 +95,13 @@ def main() -> int:
         gc.top_k = None
 
     # ── Apply NVFP4A16 quantization config (GROUP strategy for vLLM compat) ─
-    from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy, QuantizationType, FP4_E2M1_DATA, FP8_E4M3_DATA, QuantizationScheme
+    from compressed_tensors.quantization import (
+        FP8_E4M3_DATA,
+        QuantizationArgs,
+        QuantizationScheme,
+        QuantizationStrategy,
+        QuantizationType,
+    )
 
     weights_args = QuantizationArgs(
         num_bits=4,
@@ -103,7 +109,7 @@ def main() -> int:
         strategy=QuantizationStrategy.GROUP,  # GROUP for vLLM FusedMoE compat (not tensor_group)
         symmetric=True,
         dynamic=False,
-        group_size=64,
+        group_size=16,
         scale_dtype=FP8_E4M3_DATA.dtype,
         zp_dtype=FP8_E4M3_DATA.dtype,
     )

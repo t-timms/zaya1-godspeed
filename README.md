@@ -13,13 +13,37 @@ ZAYA1-8B punches well above its weight on math and coding benchmarks
 (760M active / 8.4B total params, MoE). Per its own [technical report](https://arxiv.org/abs/2605.05365)
 (May 2026), Zyphra **deliberately skipped** the multi-turn agentic RL stage —
 the agentic gap is a training omission, not a capability ceiling. This project
-completes ZAYA1-8B by adding that missing stage.
+completes ZAYA1-8B by adding that missing stage, served from a 4-bit NVFP4
+quantization on 16 GB consumer hardware.
+
+## Status (May 2026)
+
+- ✅ **NVFP4 Compressed-Tensors ZAYA1-8B** quantized at group_size=16 (5.04 GB)
+- ✅ **First coherent text generation on Blackwell sm_120** via vLLM (May 14, session 2): "The capital of France is" → " Paris."; coherent BST explanation
+- ✅ Serves at ~0.86 tok/s on RTX 5070 Ti (16 GB) using Path A on-the-fly Python dequant; bf16 inference dtype required
+- ⬜ Stage 2 next: custom Blackwell NVFP4 Tensor Core CUDA kernel for >10× speedup
+- ⬜ Phase 3+: Teacher trajectories, SFT, GRPO, BFCL-v4 / τ² evaluation
+
+See [`RESEARCH.md`](./RESEARCH.md) §5.9–§5.10 for the five-bug debugging story and
+[`ROADMAP.md`](./ROADMAP.md) for phase-by-phase status.
 
 ## Quick Start
 
 ```bash
 uv sync
 python scripts/test_peft.py   # verify PEFT compatibility
+```
+
+### Serve the NVFP4 model (WSL)
+
+```bash
+# In WSL: apply vLLM patches (idempotent), then run the smoke check.
+source /home/ttimm/vllm-env/bin/activate
+export PATH=/usr/local/cuda/bin:$PATH
+python3 scripts/wsl_fix_moe_scale_routing.py    # session 1
+python3 scripts/wsl_fix_marlin_group_size.py    # session 1
+python3 scripts/wsl_fix_nvfp4_text_gen.py       # session 2
+bash    scripts/wsl_run_quick_check.sh          # dtype=bfloat16 required
 ```
 
 ## Project Structure

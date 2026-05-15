@@ -15,6 +15,18 @@
 | Thinking mode | `<think>` blocks, always-on in chat template |
 | License | Apache 2.0 |
 
+## Inference Compatibility Matrix (May 2026)
+
+| Path | Status | Size | Notes |
+|------|--------|------|-------|
+| vLLM + bf16 (Zyphra fork) | ❌ | 16.48 GB | Exceeds 16 GB VRAM |
+| vLLM + FP8 (Zyphra fork) | ✅ | 8.76 GB | Serves, output quality unverified |
+| vLLM + NVFP4 GGUF | ❌ | 4.76 GB | vLLM GGUF handler lacks NVFP4 tensor type |
+| vLLM + NVFP4 Compressed-Tensors | ✅ | 5.04 GB | **Coherent text May 14 session 2.** Path A Python dequant. Requires 5 patches. `dtype="bfloat16"` mandatory. See `RESEARCH.md` §5.9–§5.10. |
+| transformers + NF4 (bitsandbytes) | ❌ | 7.2 GB | Dequant produces garbage on CCA attention |
+| vLLM + bitsandbytes | ❌ | — | ZayaForCausalLM lacks `packed_modules_mapping` |
+| vLLM + MXFP4 (OsaurusAI) | ❌ | 5.45 GB | Weight shape mismatch with Zyphra fork |
+
 ## PEFT Compatibility Gate ✓ PASSED
 
 ```

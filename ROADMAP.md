@@ -106,18 +106,31 @@ Consumer Blackwell (SM120/RTX 5070 Ti) uses an **extended `mma.sync.aligned.kind
 - `quantization/marlin/marlin.cu` — Marlin kernel (works on sm_120 for Linear but corrupts MoE scales)
 - `moe/marlin_moe_wna16/ops.cu` — Marlin MoE kernel (weight-only FP4, dequantizes weights on the fly)
 
-**Approach**: Rebuild vLLM from source with `ENABLE_NVFP4_SM120=ON` + CUTLASS 3.8+, then wire `cutlass_fp4_group_mm` into the NVFP4 MoE dispatch. Uses NVIDIA's own optimized SM120 kernels — no custom CUDA code required.
+**Build result (May 15, 2026, session 4) — KERNELS COMPILED ✓**:
+- ✅ vLLM rebuilt from source with `TORCH_CUDA_ARCH_LIST=12.0 MAX_JOBS=8 pip install -e . --no-build-isolation`
+- ✅ Build time: ~75 minutes, editable install at `/home/ttimm/vllm-src/vllm/`
+- ✅ `_C_stable_libtorch.abi3.so` (107MB) and `_C.abi3.so` (205MB) compiled with SM120 NVFP4 CUTLASS kernels
+- ✅ `cutlass_scaled_mm_supports_fp4(120)` → **True** — SM120 confirmed working
+- ✅ `cutlass_scaled_fp4_mm` dispatches to `cutlass_scaled_fp4_mm_sm120a` for SM120
+- ✅ `cutlass_fp4_group_mm` available for Group MoE GEMM on SM120
+- ✅ NVFP4 CUTLASS Linear wiring already exists: `CutlassNvFp4LinearKernel` in `vllm/model_executor/kernels/linear/nvfp4/cutlass.py`
+- ✅ NVFP4 CUTLASS MoE wiring already exists: `NvFp4MoeBackend.VLLM_CUTLASS` in `vllm/model_executor/layers/fused_moe/oracle/nvfp4.py`
+
+**Approach**: vLLM already has the full wiring — the only missing piece was the compiled SM120 kernels, now resolved. The `CutlassNvFp4LinearKernel` and `VLLM_CUTLASS` MoE backend are now functional on SM120.
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Set up CUDA LSP (clangd + compile_commands.json) | 🟡 | clangd install pending (WSL apt-get timeout). vLLM source cloned. |
-| Rebuild vLLM from source with SM120 CUTLASS support | ⬜ | Requires `ENABLE_NVFP4_SM120=ON`, CUTLASS 3.8+, CUDA 13.2. |
-| Wire `cutlass_fp4_group_mm` into MoE `apply()` | ⬜ | Activate dynamic FP4 activation quantization path. |
+| Set up CUDA LSP (clangd + compile_commands.json) | ❌ | Skipped — not needed for build. |
+| Rebuild vLLM from source with SM120 CUTLASS support | ✅ | `TORCH_CUDA_ARCH_LIST=12.0`, CUTLASS 4.4.2, CUDA 13.2. ~75 min build. |
+| Verify kernel availability | ✅ | `cutlass_scaled_mm_supports_fp4(120)=True`. All 3 ops present in `torch.ops._C`. |
+| Apply Zyphra overlay to vLLM source (zaya.py, cca.py, registry) | ⬜ | Files at `/tmp/zaya-vllm/`. Copy to `/home/ttimm/vllm-src/vllm/` + registry patch. |
+| End-to-end NVFP4 CUTLASS inference with zaya1-8b-ct-gs16 | ⬜ | Model loads but needs `ZayaForCausalLM` registered. |
+| Wire `cutlass_fp4_group_mm` into MoE `apply()` | ✅ | Already wired — `NvFp4MoeBackend.VLLM_CUTLASS` exists in nvfp4.py. |
 | Verify scale format compatibility (signed E4M3 → unsigned E4M3) | ⬜ | Our checkpoint scales are non-negative; casting should be a no-op. |
-| Wire `cutlass_scaled_fp4_mm_sm120a` for CCA attention Linear layers | ⬜ | Replace Python dequant fallback for CCA projections. |
-| Drop the bf16-required inference contract | ⬜ | CUTLASS kernel performs accumulation in fp32 internally. |
+| Wire `cutlass_scaled_fp4_mm_sm120a` for CCA attention Linear layers | ✅ | Already wired — `CutlassNvFp4LinearKernel` in cutlass.py. |
+| Drop the bf16-required inference contract | ⬜ | CUTLASS kernel accumulates in fp32 internally — should handle fp16 inputs. |
 | Benchmark Stage 2 vs Stage 1 (target: >10× speedup) | ⬜ | Deterministic dequant math → identical output quality. |
-| Submit upstream PR to vLLM | ⬜ | SM120 support is already in vLLM source — PR fixes the build flags + MoE wiring. |
+| Submit upstream PR to vLLM | ⬜ | SM120 support is already in vLLM source — PR would fix pre-built wheel flags. |
 
 **Key technical findings from GGUF loading attempts**:
 - vLLM's GGUF handler lacks NVFP4 tensor type support; requires adding to DEQUANT_TYPES + Python dequant fallback

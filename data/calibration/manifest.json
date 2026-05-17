@@ -1,19 +1,36 @@
 {
-  "version": "1.0.0",
-  "created": "2026-05-12T07:00:36Z",
+  "version": "3.0.0",
+  "created": "2026-05-17T00:50:20Z",
   "model": "Zyphra/ZAYA1-8B",
-  "purpose": "NVFP4 Stage 1 calibration data for compressed_tensors quantization",
-  "total_samples": 512,
+  "purpose": "NVFP4 W4A4 calibration data \u2014 input_global_scale per fused Linear",
+  "mix_profile": "phase1",
+  "packing_mode": "concat-pack-with-eos-separator",
+  "total_samples": 979,
   "max_length": 1024,
   "shape": [
-    512,
+    979,
     1024
   ],
   "dtype": "torch.int64",
+  "pad_ratio": 5.78555924412666e-05,
+  "source_weights": {
+    "math500": 0.15,
+    "gsm8k": 0.15,
+    "humaneval": 0.05,
+    "mbpp": 0.05,
+    "triviaqa": 0.15,
+    "alpaca": 0.15,
+    "writingprompts": 0.15,
+    "glaive": 0.15
+  },
   "source_breakdown": {
-    "math500": 226,
-    "humaneval": 128,
-    "sharegpt": 128,
-    "aime": 30
+    "math500": 151,
+    "gsm8k": 153,
+    "humaneval": 38,
+    "mbpp": 25,
+    "triviaqa": 153,
+    "alpaca": 153,
+    "writingprompts": 153,
+    "glaive": 153
   }
 }

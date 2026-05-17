@@ -51,6 +51,8 @@ wandb/
 # Quantized model directories
 zaya1-8b-nvfp4-ct/
 zaya1-8b-nvfp4-ct-gs16/
+zaya1-8b-nvfp4-w4a4-dryrun/
+zaya1-8b-nvfp4-w4a4/
 
 # Training outputs
 checkpoints/

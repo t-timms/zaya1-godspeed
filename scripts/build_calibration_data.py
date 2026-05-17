@@ -1,23 +1,40 @@
-"""Gate 4: Build NVFP4 calibration dataset for Stage 1 compressed-tensors quantization.
+"""Gate 4: Build NVFP4 W4A4 calibration dataset for compressed-tensors quantization.
 
-Constructs 512 calibration samples (each exactly 1024 tokens) from four data sources
-matching ZAYA1-8B's training distribution:
-  - MATH-500: mathematical reasoning problems (~128 samples)
-  - HumanEval: Python code generation problems (~128 samples)
-  - ShareGPT-style: conversational data with tool-use patterns (~128 samples)
-  - AIME: competition math problems (~128 samples)
+Constructs 1024 calibration samples (each 1024 tokens) from seven data sources
+weighted by the Phase 1 eval surface (13 benchmarks across math, code, knowledge,
+instruction, style, agentic):
 
-The calibration data is used by the NVFP4 quantizer to select optimal scales
-per channel group. Each sample is tokenized to exactly 1024 tokens with the
-Zyphra/ZAYA1-8B tokenizer (ChatML format with thinking mode tokens).
+  Phase 1 mix (default, --num-samples 1024):
+    - MATH-500:        15% — math reasoning (AIME'26 / HMMT / IMO / APEX preservation)
+    - AIME 2024 train: 15% — competition math (NOT AIME'26 — that's the eval set)
+    - HumanEval:       10% — Python code (LiveCodeBench-v6 preservation)
+    - TriviaQA:        15% — free-form knowledge QA (GPQA-Diamond / MMLU-Pro preservation)
+    - Alpaca-cleaned:  15% — instruction-following (IFEval / IFBench preservation)
+    - WritingPrompts:  15% — creative writing style (EQBench / Creative Writing v3)
+    - Glaive-fn-call:  15% — tool-use traces (BFCL-v4 / τ² preservation)
 
-Output: data/calibration/calibration_data.pt (PyTorch tensor, [512, 1024])
-         data/calibration/manifest.json (metadata and source breakdown)
+  Legacy mix (--legacy-mix, --num-samples 512):
+    - MATH-500: 25% | HumanEval: 25% | ShareGPT: 25% | AIME: 25%
+
+Phase 1 success criterion: AIME'26 ≥ 87 (≤2 pt drop from published 89.1).
+Math weight is highest because math is the most quantization-sensitive eval class.
+
+Each sample tokenized to max-length with the Zyphra/ZAYA1-8B tokenizer (ChatML
+format, thinking-mode tokens). Calibration data feeds the W4A4 input_global_scale
+calibration pass — one per-tensor fp32 scale per fused Linear group, computed as
+max_observed_activation / 6.0 (FP4_E2M1 max magnitude).
+
+Contamination check: every source is from public train/dev splits. AIME 2024 ≠
+AIME 2026 (different problems). HumanEval ≠ LiveCodeBench. TriviaQA ≠ GPQA.
+
+Output: data/calibration/calibration_data.pt (PyTorch tensor, [N, max_length])
+        data/calibration/manifest.json (metadata, source breakdown, mix profile)
 
 Usage:
-    uv run python scripts/build_calibration_data.py
-    uv run python scripts/build_calibration_data.py --num-samples 512 --max-length 1024
-    uv run python scripts/build_calibration_data.py --offline  # use cached datasets only
+    uv run python scripts/build_calibration_data.py                   # Phase 1, 1024 samples
+    uv run python scripts/build_calibration_data.py --legacy-mix      # original 4-source, 512 samples
+    uv run python scripts/build_calibration_data.py --num-samples 256 # smaller pass for iteration
+    uv run python scripts/build_calibration_data.py --offline         # cached datasets only
 """
 
 from __future__ import annotations
@@ -35,26 +52,52 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Zyphra/ZAYA1-8B"
-DEFAULT_NUM_SAMPLES = 512
+DEFAULT_NUM_SAMPLES = 1024
 DEFAULT_MAX_LENGTH = 1024
 OUTPUT_DIR = Path("data/calibration")
 OUTPUT_FILE = OUTPUT_DIR / "calibration_data.pt"
 MANIFEST_FILE = OUTPUT_DIR / "manifest.json"
 
-# Source distribution (must sum to 1.0)
-SOURCE_WEIGHTS = {
-    "math500": 0.25,  # 128 samples
-    "humaneval": 0.25,  # 128 samples
-    "sharegpt": 0.25,  # 128 samples
-    "aime": 0.25,  # 128 samples
+# Phase 1 mix: weighted by the 13-benchmark eval surface (math-heavy because
+# math is the most quantization-sensitive class). Must sum to 1.0.
+# v2 (2026-05-17): dropped AIME (only 30 train problems — too few to fill 15%),
+# replaced with GSM8K (8K math word problems). Split humaneval 10% -> humaneval 5%
+# + mbpp 5% for code diversity. Math weight 30% preserved, code 10% preserved.
+SOURCE_WEIGHTS_PHASE1: dict[str, float] = {
+    "math500":       0.15,  # MATH-500 (competition-style math reasoning)
+    "gsm8k":         0.15,  # GSM8K (multi-step math word problems)
+    "humaneval":     0.05,  # Python function-completion code
+    "mbpp":          0.05,  # Mostly Basic Python Problems
+    "triviaqa":      0.15,  # knowledge QA
+    "alpaca":        0.15,  # instruction-following
+    "writingprompts": 0.15, # creative style
+    "glaive":        0.15,  # tool-use traces (agentic)
 }
 
-# HuggingFace dataset paths
+# Legacy mix retained for --legacy-mix flag (reproducibility of the original
+# Stage 1 W4A16 calibration that produced zaya1-8b-nvfp4-ct-gs16).
+SOURCE_WEIGHTS_LEGACY: dict[str, float] = {
+    "math500":   0.25,
+    "humaneval": 0.25,
+    "sharegpt":  0.25,
+    "aime":      0.25,
+}
+
+# Default active mix (overridden to legacy when --legacy-mix passed).
+SOURCE_WEIGHTS: dict[str, float] = SOURCE_WEIGHTS_PHASE1
+
+# HuggingFace dataset paths (all open-license, public train/dev splits)
 DATASET_PATHS: dict[str, str] = {
-    "math500": "HuggingFaceH4/MATH-500",
-    "humaneval": "openai/openai_humaneval",
-    "sharegpt": "anon8231489123/ShareGPT_Vicuna_unfiltered",
-    "aime": "Maxwell-Jia/AIME_2024",
+    "math500":        "HuggingFaceH4/MATH-500",
+    "humaneval":      "openai/openai_humaneval",
+    "mbpp":           "google-research-datasets/mbpp",   # split 'train'
+    "sharegpt":       "anon8231489123/ShareGPT_Vicuna_unfiltered",
+    "aime":           "Maxwell-Jia/AIME_2024",
+    "gsm8k":          "openai/gsm8k",                    # subset 'main', split 'train' (~7.5K problems)
+    "triviaqa":       "trivia_qa",                       # subset 'rc.nocontext', split 'train'
+    "alpaca":         "yahma/alpaca-cleaned",            # split 'train'
+    "writingprompts": "euclaise/writingprompts",         # split 'train' (subsample heavily — 1.4M total)
+    "glaive":         "glaiveai/glaive-function-calling-v2",  # split 'train'
 }
 
 
@@ -184,50 +227,225 @@ def load_aime(datasets: Any) -> list[str]:
             return []
 
 
-def tokenize_sample(
-    tokenizer: Any,
-    text: str,
-    max_length: int,
-    add_chat_template: bool = True,
-) -> list[int]:
-    """Tokenize a text sample to exactly max_length tokens.
+def load_gsm8k(datasets: Any) -> list[str]:
+    """Load GSM8K multi-step math word problems (8K train problems, open license)."""
+    try:
+        ds = datasets.load_dataset(DATASET_PATHS["gsm8k"], "main", split="train")
+        logger.info("GSM8K: loaded %d samples", len(ds))
+        texts: list[str] = []
+        for item in ds:
+            question = item.get("question", "") or ""
+            answer = item.get("answer", "") or ""
+            if question and answer:
+                texts.append(f"Problem: {question}\n\nSolution: {answer}")
+        return texts
+    except Exception as e:
+        logger.warning("GSM8K load failed: %s", e)
+        return []
 
-    Uses the ChatML template for distribution-matching with ZAYA1-8B's training format.
-    Adds <think> tokens to match the model's always-on thinking mode.
-    """
-    if add_chat_template:
-        messages = [{"role": "user", "content": text[:8000]}]  # Limit raw text
+
+def load_mbpp(datasets: Any) -> list[str]:
+    """Load MBPP (Mostly Basic Python Problems, ~974 sanitized train)."""
+    try:
+        ds = datasets.load_dataset(DATASET_PATHS["mbpp"], "sanitized", split="train")
+        logger.info("MBPP: loaded %d samples", len(ds))
+        texts: list[str] = []
+        for item in ds:
+            prompt = item.get("prompt", "") or item.get("text", "") or ""
+            code = item.get("code", "") or ""
+            test_list = item.get("test_list", []) or []
+            tests = "\n".join(test_list) if test_list else ""
+            if prompt and code:
+                if tests:
+                    texts.append(f"# Task: {prompt}\n\n# Solution:\n{code}\n\n# Tests:\n{tests}")
+                else:
+                    texts.append(f"# Task: {prompt}\n\n# Solution:\n{code}")
+        return texts
+    except Exception as e:
+        logger.warning("MBPP load failed (sanitized config): %s. Trying full config...", e)
         try:
-            tokens = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                enable_thinking=True,
-                truncation=True,
-                max_length=max_length,
-                padding="max_length",
-            )
-        except TypeError:
-            # Fallback if enable_thinking not supported
-            tokens = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                truncation=True,
-                max_length=max_length,
-                padding="max_length",
-            )
-    else:
-        encoding = tokenizer(
-            text[:8000],
-            return_tensors="pt",
-            truncation=True,
-            max_length=max_length,
-            padding="max_length",
-        )
-        tokens = encoding["input_ids"]
+            ds = datasets.load_dataset(DATASET_PATHS["mbpp"], "full", split="train")
+            logger.info("MBPP fallback (full): loaded %d samples", len(ds))
+            texts: list[str] = []
+            for item in ds:
+                prompt = item.get("text", "") or ""
+                code = item.get("code", "") or ""
+                if prompt and code:
+                    texts.append(f"# Task: {prompt}\n\n# Solution:\n{code}")
+            return texts
+        except Exception as e2:
+            logger.warning("MBPP full fallback also failed: %s", e2)
+            return []
 
-    return tokens[0].tolist()
+
+def load_triviaqa(datasets: Any) -> list[str]:
+    """Load TriviaQA free-form knowledge QA. Subset 'rc.nocontext' has just Q+A pairs."""
+    try:
+        ds = datasets.load_dataset(
+            DATASET_PATHS["triviaqa"],
+            "rc.nocontext",
+            split="train[:5000]",
+        )
+        logger.info("TriviaQA: loaded %d samples", len(ds))
+        texts: list[str] = []
+        for item in ds:
+            question = item.get("question", "") or ""
+            answer_obj = item.get("answer", {})
+            value = answer_obj.get("value", "") if isinstance(answer_obj, dict) else str(answer_obj)
+            aliases = answer_obj.get("aliases", []) if isinstance(answer_obj, dict) else []
+            answer = value if value else (aliases[0] if aliases else "")
+            if question and answer:
+                texts.append(f"Question: {question}\n\nAnswer: {answer}")
+        return texts
+    except Exception as e:
+        logger.warning("TriviaQA load failed: %s", e)
+        return []
+
+
+def load_alpaca(datasets: Any) -> list[str]:
+    """Load Alpaca-cleaned instruction-following dataset (52K open-license entries)."""
+    try:
+        ds = datasets.load_dataset(DATASET_PATHS["alpaca"], split="train[:10000]")
+        logger.info("Alpaca-cleaned: loaded %d samples", len(ds))
+        texts: list[str] = []
+        for item in ds:
+            instruction = item.get("instruction", "") or ""
+            inp = item.get("input", "") or ""
+            output = item.get("output", "") or ""
+            if not instruction:
+                continue
+            if inp:
+                texts.append(f"Instruction: {instruction}\n\nInput: {inp}\n\nResponse: {output}")
+            else:
+                texts.append(f"Instruction: {instruction}\n\nResponse: {output}")
+        return texts
+    except Exception as e:
+        logger.warning("Alpaca load failed: %s", e)
+        return []
+
+
+def load_writingprompts(datasets: Any) -> list[str]:
+    """Load WritingPrompts creative writing dataset. Heavy subsample — 1.4M total."""
+    try:
+        ds = datasets.load_dataset(
+            DATASET_PATHS["writingprompts"],
+            split="train[:3000]",
+        )
+        logger.info("WritingPrompts: loaded %d samples", len(ds))
+        texts: list[str] = []
+        for item in ds:
+            prompt = item.get("prompt", "") or ""
+            story = item.get("story", "") or ""
+            if prompt and story:
+                # Strip the [WP] tag and truncate long stories at the source
+                prompt_clean = prompt.replace("[WP]", "").strip()
+                texts.append(f"Prompt: {prompt_clean}\n\nStory:\n{story[:6000]}")
+        return texts
+    except Exception as e:
+        logger.warning("WritingPrompts load failed: %s", e)
+        return []
+
+
+def load_glaive(datasets: Any) -> list[str]:
+    """Load Glaive function-calling traces (agentic / tool-use calibration)."""
+    try:
+        ds = datasets.load_dataset(DATASET_PATHS["glaive"], split="train[:5000]")
+        logger.info("Glaive-fn-calling: loaded %d samples", len(ds))
+        texts: list[str] = []
+        for item in ds:
+            system = item.get("system", "") or ""
+            chat = item.get("chat", "") or ""
+            if not chat:
+                continue
+            # The chat field is a flat string with USER:/ASSISTANT:/FUNCTION_CALL/etc. markers —
+            # exactly the distribution we want for BFCL/τ² activation calibration.
+            if system:
+                texts.append(f"{system}\n\n{chat}")
+            else:
+                texts.append(chat)
+        return texts
+    except Exception as e:
+        logger.warning("Glaive load failed: %s", e)
+        return []
+
+
+def _encode_text_for_packing(tokenizer: Any, text: str, hard_cap: int) -> list[int]:
+    """Tokenize one text with the ChatML template, no padding, capped at hard_cap tokens.
+
+    Returns a plain list of token ids. Used by pack_source_to_chunks below.
+    """
+    messages = [{"role": "user", "content": text[:8000]}]
+    try:
+        tokens = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            return_tensors=None,
+            enable_thinking=True,
+            truncation=True,
+            max_length=hard_cap,
+        )
+    except TypeError:
+        tokens = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            return_tensors=None,
+            truncation=True,
+            max_length=hard_cap,
+        )
+    # apply_chat_template with return_tensors=None returns a list (or list-of-list for batched).
+    if tokens and isinstance(tokens[0], list):
+        return list(tokens[0])
+    return list(tokens)
+
+
+def pack_source_to_chunks(
+    tokenizer: Any,
+    texts: list[str],
+    max_length: int,
+    target_chunks: int,
+) -> list[list[int]]:
+    """Concat multiple texts into dense max_length-token chunks (no padding).
+
+    Most calibration sources have texts much shorter than max_length (TriviaQA QA
+    ~100 tok, Alpaca ~150 tok). Padding each to max_length leaves 60-90% PAD,
+    which corrupts W4A4 activation calibration: the observed max-activation per
+    Linear is dominated by PAD-token activations (small magnitudes), so scales
+    come out too small and real inference overflows.
+
+    Instead we tokenize each text raw, concat with EOS separators (so the model
+    sees a clear document boundary, same as during training pack), and slice into
+    dense max_length chunks. Only the trailing partial chunk is PAD-padded.
+
+    Returns at most target_chunks; may return fewer if the source runs out.
+    """
+    sep_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else sep_id
+    chunks: list[list[int]] = []
+    buffer: list[int] = []
+    # 4x max_length is a generous per-text cap that still keeps any single
+    # document from monopolizing the corpus.
+    per_text_cap = max_length * 4
+
+    for text in texts:
+        if len(chunks) >= target_chunks:
+            break
+        ids = _encode_text_for_packing(tokenizer, text, per_text_cap)
+        if not ids:
+            continue
+        buffer.extend(ids)
+        buffer.append(sep_id)
+        while len(buffer) >= max_length and len(chunks) < target_chunks:
+            chunks.append(buffer[:max_length])
+            buffer = buffer[max_length:]
+
+    # Take the trailing residual as one PAD-extended chunk only if we still
+    # need samples AND it's at least half-full (otherwise it's mostly PAD,
+    # which is exactly what we're trying to avoid).
+    if len(chunks) < target_chunks and len(buffer) >= max_length // 2:
+        residual = buffer + [pad_id] * (max_length - len(buffer))
+        chunks.append(residual[:max_length])
+
+    return chunks
 
 
 def build_calibration(
@@ -237,68 +455,92 @@ def build_calibration(
     num_samples: int,
     max_length: int,
 ) -> tuple[Any, dict[str, Any]]:
-    """Build the calibration tensor from source texts.
+    """Build the calibration tensor using concat-packed chunks (no padding).
 
-    Returns (tensor: [N, max_length], manifest: dict).
+    Each source contributes `int(num_samples * weight)` dense max_length-token
+    chunks built by concatenating its raw texts with EOS separators. If a source
+    runs out of text, we accept fewer chunks for that source rather than
+    duplicating filler (which would distort the recipe).
+
+    Returns (tensor: [N, max_length], manifest: dict). N may be < num_samples
+    if multiple sources are short on text.
     """
-    all_texts: list[tuple[str, str]] = []  # (source_name, text)
+    logger.info("Packing sources into dense %d-token chunks (no PAD)...", max_length)
+    t0 = time.time()
+    all_chunks: list[tuple[str, list[int]]] = []
+
     for source_name, weight in SOURCE_WEIGHTS.items():
-        target_count = int(num_samples * weight)
+        target_chunks = int(num_samples * weight)
         texts = sources.get(source_name, [])
         if not texts:
-            logger.warning("  %s: 0 samples available (target: %d)", source_name, target_count)
+            logger.warning("  %s: 0 texts available (target chunks: %d)", source_name, target_chunks)
             continue
 
-        # Sample from available texts
-        if len(texts) <= target_count:
-            selected = texts
+        # Deterministic shuffle so chunks aren't biased toward dataset ordering.
+        import random
+        rng = random.Random(42)
+        indices = list(range(len(texts)))
+        rng.shuffle(indices)
+        shuffled = [texts[i] for i in indices]
+
+        chunks = pack_source_to_chunks(tokenizer, shuffled, max_length, target_chunks)
+        for c in chunks:
+            all_chunks.append((source_name, c))
+
+        if len(chunks) < target_chunks:
+            logger.warning(
+                "  %s: %d/%d chunks (short by %d — source text exhausted)",
+                source_name, len(chunks), target_chunks, target_chunks - len(chunks),
+            )
         else:
-            # Deterministic shuffle for reproducibility
-            import random
+            logger.info("  %s: %d chunks", source_name, len(chunks))
 
-            rng = random.Random(42)
-            indices = list(range(len(texts)))
-            rng.shuffle(indices)
-            selected = [texts[i] for i in indices[:target_count]]
-
-        for text in selected:
-            all_texts.append((source_name, text))
-        logger.info("  %s: %d samples", source_name, len(selected))
-
-    if not all_texts:
-        logger.error("No calibration data available from any source")
+    if not all_chunks:
+        logger.error("No calibration chunks built from any source")
         return None, {}
 
-    # If we don't have enough, duplicate to reach target
-    while len(all_texts) < num_samples:
-        all_texts.extend(all_texts[: num_samples - len(all_texts)])
-    all_texts = all_texts[:num_samples]
+    if len(all_chunks) < num_samples:
+        logger.warning(
+            "Total chunks %d < target %d. Proceeding with available data; "
+            "recipe proportions preserved (no filler duplication).",
+            len(all_chunks), num_samples,
+        )
 
-    logger.info("Tokenizing %d samples to %d tokens each ...", len(all_texts), max_length)
-    t0 = time.time()
-    token_ids: list[list[int]] = []
-    for source_name, text in all_texts:
-        ids = tokenize_sample(tokenizer, text, max_length)
-        token_ids.append(ids)
+    # Cap at requested count (shouldn't trip unless one source over-packs).
+    all_chunks = all_chunks[:num_samples]
 
+    token_ids = [c for _, c in all_chunks]
     tensor = torch.tensor(token_ids, dtype=torch.long)
     elapsed = time.time() - t0
-    logger.info("Tokenization complete: %.1fs (%.1f samples/s)", elapsed, len(all_texts) / elapsed)
+    logger.info(
+        "Built %d chunks of %d tokens in %.1fs (%.1f chunks/s)",
+        len(all_chunks), max_length, elapsed, len(all_chunks) / max(elapsed, 0.001),
+    )
 
-    # Build manifest
+    # Source breakdown reflects ACTUAL counts (after any short-source truncation).
     source_counts: dict[str, int] = {}
-    for source_name, _ in all_texts:
+    for source_name, _ in all_chunks:
         source_counts[source_name] = source_counts.get(source_name, 0) + 1
 
+    # Compute PAD ratio for the manifest (sanity metric — should be < 5%
+    # under packed mode, was 68% under old pad-to-max mode).
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    pad_count = (tensor == pad_id).sum().item()
+    pad_ratio = pad_count / max(tensor.numel(), 1)
+
     manifest: dict[str, Any] = {
-        "version": "1.0.0",
+        "version": "3.0.0",
         "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "model": DEFAULT_MODEL,
-        "purpose": "NVFP4 Stage 1 calibration data for compressed_tensors quantization",
-        "total_samples": len(all_texts),
+        "purpose": "NVFP4 W4A4 calibration data — input_global_scale per fused Linear",
+        "mix_profile": "phase1" if SOURCE_WEIGHTS is SOURCE_WEIGHTS_PHASE1 else "legacy",
+        "packing_mode": "concat-pack-with-eos-separator",
+        "total_samples": len(all_chunks),
         "max_length": max_length,
         "shape": list(tensor.shape),
         "dtype": str(tensor.dtype),
+        "pad_ratio": pad_ratio,
+        "source_weights": dict(SOURCE_WEIGHTS),
         "source_breakdown": source_counts,
     }
 
@@ -336,13 +578,32 @@ def main() -> int:
         action="store_true",
         help="Use cached datasets only; skip downloads",
     )
+    parser.add_argument(
+        "--legacy-mix",
+        action="store_true",
+        help="Use the original 4-source 25/25/25/25 mix (MATH-500, HumanEval, ShareGPT, AIME). "
+             "Default is the Phase 1 7-source benchmark-weighted mix.",
+    )
     args = parser.parse_args()
 
+    # Activate the legacy mix if requested. Default num-samples drops to 512 to match
+    # the original legacy run unless the user explicitly set a different count.
+    global SOURCE_WEIGHTS
+    if args.legacy_mix:
+        SOURCE_WEIGHTS = SOURCE_WEIGHTS_LEGACY
+        if args.num_samples == DEFAULT_NUM_SAMPLES:
+            args.num_samples = 512
+
+    mix_name = "LEGACY (4-source 25/25/25/25)" if args.legacy_mix else "PHASE 1 (7-source benchmark-weighted)"
     logger.info("=== GATE 4: Calibration Dataset Build ===")
+    logger.info("Mix:        %s", mix_name)
     logger.info("Model:      %s", args.model_id)
     logger.info("Samples:    %d", args.num_samples)
     logger.info("Max length: %d", args.max_length)
     logger.info("Output:     %s", args.output_dir)
+    logger.info("Source weights:")
+    for src, w in SOURCE_WEIGHTS.items():
+        logger.info("  %s: %.0f%% (~%d samples)", src, w * 100, int(args.num_samples * w))
 
     torch, datasets, transformers = import_libraries()
 
@@ -359,17 +620,47 @@ def main() -> int:
 
     sources: dict[str, list[str]] = {}
 
-    logger.info("Loading MATH-500 ...")
-    sources["math500"] = load_math500(datasets)
+    # Only load the sources the active mix actually uses. Saves bandwidth and
+    # avoids download failures on sources we don't need.
+    if "math500" in SOURCE_WEIGHTS:
+        logger.info("Loading MATH-500 ...")
+        sources["math500"] = load_math500(datasets)
 
-    logger.info("Loading HumanEval ...")
-    sources["humaneval"] = load_humaneval(datasets)
+    if "humaneval" in SOURCE_WEIGHTS:
+        logger.info("Loading HumanEval ...")
+        sources["humaneval"] = load_humaneval(datasets)
 
-    logger.info("Loading ShareGPT ...")
-    sources["sharegpt"] = load_sharegpt(datasets)
+    if "sharegpt" in SOURCE_WEIGHTS:
+        logger.info("Loading ShareGPT ...")
+        sources["sharegpt"] = load_sharegpt(datasets)
 
-    logger.info("Loading AIME ...")
-    sources["aime"] = load_aime(datasets)
+    if "aime" in SOURCE_WEIGHTS:
+        logger.info("Loading AIME ...")
+        sources["aime"] = load_aime(datasets)
+
+    if "gsm8k" in SOURCE_WEIGHTS:
+        logger.info("Loading GSM8K ...")
+        sources["gsm8k"] = load_gsm8k(datasets)
+
+    if "mbpp" in SOURCE_WEIGHTS:
+        logger.info("Loading MBPP ...")
+        sources["mbpp"] = load_mbpp(datasets)
+
+    if "triviaqa" in SOURCE_WEIGHTS:
+        logger.info("Loading TriviaQA ...")
+        sources["triviaqa"] = load_triviaqa(datasets)
+
+    if "alpaca" in SOURCE_WEIGHTS:
+        logger.info("Loading Alpaca-cleaned ...")
+        sources["alpaca"] = load_alpaca(datasets)
+
+    if "writingprompts" in SOURCE_WEIGHTS:
+        logger.info("Loading WritingPrompts ...")
+        sources["writingprompts"] = load_writingprompts(datasets)
+
+    if "glaive" in SOURCE_WEIGHTS:
+        logger.info("Loading Glaive-fn-calling ...")
+        sources["glaive"] = load_glaive(datasets)
 
     # Report availability
     available = sum(1 for v in sources.values() if v)

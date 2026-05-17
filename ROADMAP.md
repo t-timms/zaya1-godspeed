@@ -139,6 +139,99 @@ Consumer Blackwell (SM120/RTX 5070 Ti) uses an **extended `mma.sync.aligned.kind
 - CCA attention requires GPU; CPU offloading produces garbage output
 - `CompressedTensorsW4A16Fp4` uses Marlin FP4 kernel (not Blackwell-specific); `get_min_capability()` returns 75 (Turing+)
 
+### Path B — W4A4 Weight+Activation Quantization 🟡
+
+**Goal**: Go beyond Path A's weight-only NVFP4 (W4A16) to full weight+activation
+quantization (W4A4) using llm-compressor + compressed-tensors. W4A4 quantizes
+both weights AND activations to 4-bit FP4, requiring per-Linear activation
+calibration (input_global_scale) via forward-pass statistics.
+
+**Motivation**: W4A4 reduces model size further than W4A16 by quantizing
+activations. For ZAYA1-8B on 16 GB consumer hardware, this enables even larger
+KV caches and batch sizes. The upcoming CUTLASS SM120 kernel handles W4A4
+natively via Blackwell Tensor Core MMA.
+
+#### Week 1.1 — Calibration Corpus ✅
+
+Built padding-free packed 1024-prompt calibration corpus:
+
+| Metric | Value |
+|--------|-------|
+| Total samples | 979 |
+| Max length | 1024 tokens |
+| Packing mode | concat-pack with EOS separator |
+| Pad ratio | 0.006% (effectively zero-padding) |
+| Source mix | math500 (15%), gsm8k (15%), humaneval (5%), mbpp (5%), triviaqa (15%), alpaca (15%), writingprompts (15%), glaive (15%) |
+| Output | `data/calibration/manifest.json` + tokenized tensors |
+
+**Architecture**: The corpus packs multiple prompts end-to-end with EOS
+separators, then slices into fixed 1024-token blocks. This avoids the GPU
+memory bloat of padding to max-length and provides uniform tensor shapes for
+calibration.
+
+#### Week 1.2 — W4A4 Scheme Extension ✅
+
+Extended `scripts/quantize_zaya_ct_nvfp4.py` with `--scheme w4a4` support:
+- Activates llm-compressor's activation quantization pipeline
+- Requires calibration data for `input_global_scale` computation
+- New CLI args: `--scheme {w4a16,w4a4}`, `--calibration-data PATH`, `--dry-run-layers N`
+- `W4A4` = NVFP4 weights (FP4_E2M1) + NVFP4 activation scales (FP8_E4M3 input_global_scale)
+
+#### Week 1.2 Validation — Dry-Run Results 🟡
+
+Ran W4A4 dry-run on 4 layers + 8 calibration samples. **Result: FAILED — CPU
+calibration is a dead end for Zaya.**
+
+| Problem | Detail |
+|---------|--------|
+| **Forward pass crash** | All 8 passes failed with `max(): Expected reduction dim` for `input.numel() == 0`. Zaya's CCA attention and custom forward do not work on CPU — assumes CUDA kernels. |
+| **Calibration coverage** | Only 4 of 1,480 Linears got non-zero `input_global_scale`. Those 4 all read identical 10.625 (suspect — suggests partial forward firing once before crash). Saved scales are 8.97e-44 (near-zero garbage). |
+| **Output dir bloat** | 18.56 GB. Only 74 dry-run modules got compressed; everything else saved as raw BF16. The verification logic reports "PASSED" because it counts keys present, not whether values are valid — quality-gate bug. |
+
+**Root cause**: llm-compressor's calibration loop uses `model.forward()` on
+CPU tensors. ZayaForCausalLM's CCA attention implements depthwise+grouped
+conv1d operations that call CUDA-only primitives internally. The forward pass
+never completes, so no hidden-state maxes are observed, and nearly all
+input_global_scale values remain at initialization.
+
+#### Recommended Next Step — Layer-Wise GPU Calibration
+
+**Architecture**: Process one Zaya layer at a time on GPU:
+
+1. Embed the 979×1024 calibration tensor on **GPU**
+2. Forward through layer 0: save output hidden states to CPU, observe maxes
+   via forward hooks, move layer 0 back to CPU
+3. Repeat for layers 1..79, reusing saved hidden states as input to the next layer
+4. Compute `input_global_scale` per Linear from observed activation maxes
+
+**Why this works**:
+- Each Zaya layer fits comfortably on GPU (~200 MB BF16)
+- CCA attention runs natively on GPU — no CPU forward bug
+- ~10–20× faster than naive full-model forward (~30–60 min vs ~8 hr CPU)
+- ~150 LOC of new code needed
+
+**Production precedent**: This is the standard approach used by production NVFP4
+quantizers (llm-compressor's built-in GPU calibration uses the same pattern
+under the hood, but was never tested with Zaya's custom forward).
+
+**Also needed**: Two quality-of-life fixes:
+1. **Quality gate**: The `quantize_zaya_ct_nvfp4.py` verification should ERROR
+   (not "PASS") if `input_global_scale` coverage falls below a threshold
+   (e.g., <95% of Linears have non-zero scales)
+2. **Output dir bloat**: Only save BF16 weights for un-quantized layers;
+   don't duplicate compressed weights as BF16
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Build padding-free 1024-prompt calibration corpus | ✅ | 979 samples, 8 sources, 0.006% pad ratio |
+| Extend quantize script with `--scheme w4a4` | ✅ | `scripts/quantize_zaya_ct_nvfp4.py` |
+| W4A4 dry-run on 4 layers + 8 cal samples | 🟡 | FAILED — CPU calibration broken for Zaya |
+| Implement layer-wise GPU calibration (~150 LOC) | ⬜ | Process layers one-at-a-time on GPU |
+| Fix quality gate (ERROR on low coverage) | ⬜ | Verify `input_global_scale` coverage ≥95% |
+| Fix output-dir bloat (don't duplicate BF16) | ⬜ | Only save raw BF16 for un-quantized layers |
+| Full W4A4 quantization on all 80 layers | ⬜ | Blocked on GPU calibration |
+| Integrate W4A4 with CUTLASS SM120 kernel | ⬜ | CUTLASS SM120 natively supports W4A4 |
+
 ---
 
 ## Phase 3 — Teacher Trajectory Generation 🟡

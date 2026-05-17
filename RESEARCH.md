@@ -3,7 +3,7 @@
 **Project**: zaya1-godspeed  
 **Experiment Lead**: Tremayne Timms  
 **Date**: May 12, 2026  
-**Status**: Phase 2 Stage 1 COMPLETE — coherent text generation (May 14, 2026, session 2). NVFP4 Compressed-Tensors ZAYA1-8B serves correctly via vLLM on RTX 5070 Ti (Blackwell sm_120). Greedy decoding answers "The capital of France is" → " Paris." and produces coherent BST reasoning. All 4,244 weights load; ~5.5 GiB VRAM; ~0.86–0.90 tok/s on Path A (on-the-fly Python dequant). Five upstream vLLM/Zaya fixes applied. Stage 2 (custom Blackwell NVFP4 Tensor Core CUDA kernel) is next for speed.
+**Status**: Phase 2 Stage 2 CUTLASS SM120 kernels compiled and verified (May 15, 2026, session 4). Path B W4A4 Phase 1 dry-run completed with CPU calibration failure, layer-wise GPU calibration designed (May 17, 2026). NVFP4 Compressed-Tensors ZAYA1-8B serves correctly via vLLM on RTX 5070 Ti (Blackwell sm_120). Greedy decoding answers "The capital of France is" → " Paris." and produces coherent BST reasoning. All 4,244 weights load; ~5.5 GiB VRAM; ~0.86–0.90 tok/s on Path A (on-the-fly Python dequant). Five upstream vLLM/Zaya fixes applied. Stage 2 CUTLASS speedup next; W4A4 weight+activation quantization parallel track.
 
 ---
 
@@ -531,6 +531,84 @@ bash scripts/wsl_run_quick_check.sh
 ```
 
 Expected output: " Paris..." for the raw prompt, coherent BST explanation for the chat prompt. If the model produces all pad tokens (id 0), one of the three session-2 fixes did not apply cleanly — run the patch script with verbose flags or inspect the WSL vllm-env files directly.
+
+### 5.11 Path B — W4A4 Weight+Activation Quantization (May 17, 2026)
+
+#### 5.11.1 Motivation
+
+Path A's weight-only NVFP4 (W4A16) quantizes weights to 4-bit but leaves
+activations at FP16/BF16. Full W4A4 (4-bit weights + 4-bit activations) reduces
+both, enabling larger KV caches and batch sizes on 16 GB consumer hardware.
+W4A4 is the native format for Blackwell's NVFP4 Tensor Core MMA — the CUTLASS
+SM120 kernel (compiled May 15 in Stage 2) handles W4A4 natively.
+
+W4A4 requires **activation calibration**: running real prompts through the model
+to observe per-Linear activation ranges, then computing `input_global_scale`
+values that prevent FP4 overflow. This is done via llm-compressor's calibration
+pipeline, which needs a forward pass through the model.
+
+#### 5.11.2 Calibration Corpus Design
+
+| Property | Value |
+|----------|-------|
+| Total samples | 979 |
+| Max length | 1024 tokens |
+| Packing mode | concat-pack with EOS separator |
+| Pad ratio | 0.006% (near-zero) |
+| Source mix | math500 (15%), gsm8k (15%), humaneval (5%), mbpp (5%), triviaqa (15%), alpaca (15%), writingprompts (15%), glaive (15%) |
+
+The corpus packs multiple prompts end-to-end with EOS separators, then slices
+into fixed 1024-token blocks. This avoids GPU memory bloat from padding and
+provides uniform tensor shapes for batch calibration.
+
+#### 5.11.3 CPU Calibration Dry-Run — FAILED
+
+**Result**: W4A4 dry-run on 4 layers + 8 calibration samples crashed.
+
+Three problems identified:
+
+1. **Forward pass crash**: All 8 passes failed with `max(): Expected reduction dim`
+   for `input.numel() == 0`. Zaya's CCA attention implements CUDA-only primitives
+   (depthwise+grouped conv1d) that do not work on CPU. The forward pass never
+   completes, so no hidden-state maxes are observed.
+
+2. **Calibration coverage**: Only 4 of 1,480 Linears got non-zero
+   `input_global_scale`. Those 4 all read identical 10.625 (suspicious — suggests
+   a partial forward firing once before the crash). Remaining scales are 8.97e-44
+   (near-zero garbage from torch.empty initialization).
+
+3. **Output dir bloat**: 18.56 GB. Only 74 dry-run modules got compressed;
+   everything else saved as raw BF16. The verification logic reports "PASSED"
+   because it counts keys present, not whether values are valid.
+
+**Root cause**: llm-compressor's calibration loop uses `model.forward()` on CPU
+tensors. ZayaForCausalLM's CCA attention calls CUDA-only operations internally.
+CPU calibration is fundamentally broken for Zaya.
+
+#### 5.11.4 Layer-Wise GPU Calibration Architecture (Recommended)
+
+Process one Zaya layer at a time on GPU:
+
+1. Embed the 979×1024 calibration tensor on **GPU**
+2. Forward through layer 0: save output hidden states to CPU, observe maxes
+   via forward hooks, move layer 0 back to CPU
+3. Repeat for layers 1..79, reusing saved hidden states as input
+
+**Why this works**:
+- Each Zaya layer fits comfortably on GPU (~200 MB BF16)
+- CCA attention runs natively on GPU — no CPU forward bug
+- ~10–20× faster than naive full-model forward (~30–60 min vs ~8 hr CPU)
+- ~150 LOC of new code needed
+
+**Production precedent**: This is the standard approach used by production
+NVFP4 quantizers. llm-compressor's GPU calibration uses the same pattern
+under the hood but was never tested with Zaya's custom forward.
+
+Also needed: quality gate fix (ERROR not "PASS" when calibration coverage
+<95%) and output-dir bloat fix (don't save duplicate BF16 for compressed layers).
+
+See `ROADMAP.md` → Path B — W4A4 Weight+Activation Quantization for full
+task tracking.
 
 ### 6.1 Audited Repositories
 

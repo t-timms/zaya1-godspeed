@@ -870,7 +870,7 @@ def run_w4a4(args: Any) -> int:
                 "%d near-zero garbage", len(igs_keys), expected_igs, coverage * 100,
                 nonzero_igs, nonzero_coverage * 100, near_zero_igs)
     if sample_vals:
-        logger.info("Sample IGS values: %s", ["%.4f" % v for v in sample_vals])
+        logger.info("Sample IGS values: %s", [f"{v:.4f}" for v in sample_vals])
 
     # Threshold: ≥95% of compressed Linears must have a non-zero input_global_scale.
     # Anything lower means calibration didn't reach those modules.

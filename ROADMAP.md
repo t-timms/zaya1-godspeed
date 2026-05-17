@@ -139,7 +139,7 @@ Consumer Blackwell (SM120/RTX 5070 Ti) uses an **extended `mma.sync.aligned.kind
 - CCA attention requires GPU; CPU offloading produces garbage output
 - `CompressedTensorsW4A16Fp4` uses Marlin FP4 kernel (not Blackwell-specific); `get_min_capability()` returns 75 (Turing+)
 
-### Path B — W4A4 Weight+Activation Quantization 🟡
+### Path B — W4A4 Weight+Activation Quantization 🟢 (Week 1 complete)
 
 **Goal**: Go beyond Path A's weight-only NVFP4 (W4A16) to full weight+activation
 quantization (W4A4) using llm-compressor + compressed-tensors. W4A4 quantizes
@@ -177,60 +177,69 @@ Extended `scripts/quantize_zaya_ct_nvfp4.py` with `--scheme w4a4` support:
 - New CLI args: `--scheme {w4a16,w4a4}`, `--calibration-data PATH`, `--dry-run-layers N`
 - `W4A4` = NVFP4 weights (FP4_E2M1) + NVFP4 activation scales (FP8_E4M3 input_global_scale)
 
-#### Week 1.2 Validation — Dry-Run Results 🟡
+#### Week 1.2 Validation — Dry-Run Results 🟡 (historical)
 
-Ran W4A4 dry-run on 4 layers + 8 calibration samples. **Result: FAILED — CPU
-calibration is a dead end for Zaya.**
+Initial CPU-calibration approach failed: 4/1480 Linears observed, all reading
+identical 10.625, output dir 18.56 GB. Attributed at first to "CCA needs CUDA";
+true root cause was found in Week 1.3 (see below) — `apply_quantization_config`
+silently replaced each Linear's `forward` with a NaN-producing fake-quant
+wrapper, so downstream activations were all NaN/zero regardless of platform.
 
-| Problem | Detail |
-|---------|--------|
-| **Forward pass crash** | All 8 passes failed with `max(): Expected reduction dim` for `input.numel() == 0`. Zaya's CCA attention and custom forward do not work on CPU — assumes CUDA kernels. |
-| **Calibration coverage** | Only 4 of 1,480 Linears got non-zero `input_global_scale`. Those 4 all read identical 10.625 (suspect — suggests partial forward firing once before crash). Saved scales are 8.97e-44 (near-zero garbage). |
-| **Output dir bloat** | 18.56 GB. Only 74 dry-run modules got compressed; everything else saved as raw BF16. The verification logic reports "PASSED" because it counts keys present, not whether values are valid — quality-gate bug. |
+#### Week 1.3 — Layer-Wise GPU Calibration ✅ (2026-05-17)
 
-**Root cause**: llm-compressor's calibration loop uses `model.forward()` on
-CPU tensors. ZayaForCausalLM's CCA attention implements depthwise+grouped
-conv1d operations that call CUDA-only primitives internally. The forward pass
-never completes, so no hidden-state maxes are observed, and nearly all
-input_global_scale values remain at initialization.
+Replaced the broken CPU calibration with a layer-wise GPU pipeline in
+`calibrate_input_global_scales_layerwise()` (~210 LOC). The function:
 
-#### Recommended Next Step — Layer-Wise GPU Calibration
+1. Embeds the 979×1024 calibration tensor on GPU (one batch at a time).
+2. For each of the 80 decoder layers: moves the layer to GPU, registers
+   forward-pre-hooks on every quantized Linear in the layer, forwards each
+   cached sample state through it, caches the new `(hidden_states, residual,
+   prev_router_hidden_states)` to CPU, then moves the layer back to CPU.
+3. Sets `input_global_scale = max_act / FP4_E2M1_MAX` per Linear from observed
+   max-abs activations.
 
-**Architecture**: Process one Zaya layer at a time on GPU:
+Five additional fixes shipped in the same change:
 
-1. Embed the 979×1024 calibration tensor on **GPU**
-2. Forward through layer 0: save output hidden states to CPU, observe maxes
-   via forward hooks, move layer 0 back to CPU
-3. Repeat for layers 1..79, reusing saved hidden states as input to the next layer
-4. Compute `input_global_scale` per Linear from observed activation maxes
+| Fix | Impact |
+|-----|--------|
+| Restore `nn.Linear.forward` on every quantized Linear after `apply_quantization_config` | Removes the silent NaN fake-quant wrapper that masked all downstream hooks — coverage went from 4/1480 to 1480/1480 |
+| Skip pre-hooks when `x.numel() == 0` | MoE expert sparsity: experts that received zero routed tokens crash `.max()` with no reduction dim |
+| Quality gate: ERROR if `nonzero_igs / expected_igs < 0.95` | Catches calibration failures that the old "key count" verification reported as PASS |
+| Dry-run bloat fix: drop params from layers ≥ DRY_RUN_LAYERS_W4A4 | Dry-run output 18.56 GB → 1.32 GB |
+| CCA ignore regex `re:.*cca.*` → `re:.*qkv.*` | `cca` substring never appeared in any path; CCA Q/K/V projections were being W4A4-quantized when intent was BF16. Fixed → 160 CCA Linears now stay BF16 |
 
-**Why this works**:
-- Each Zaya layer fits comfortably on GPU (~200 MB BF16)
-- CCA attention runs natively on GPU — no CPU forward bug
-- ~10–20× faster than naive full-model forward (~30–60 min vs ~8 hr CPU)
-- ~150 LOC of new code needed
+#### Week 1.3 — Full Quantization Results 🟢
 
-**Production precedent**: This is the standard approach used by production NVFP4
-quantizers (llm-compressor's built-in GPU calibration uses the same pattern
-under the hood, but was never tested with Zaya's custom forward).
+Final W4A4 checkpoint at `./zaya1-8b-nvfp4-w4a4/`:
 
-**Also needed**: Two quality-of-life fixes:
-1. **Quality gate**: The `quantize_zaya_ct_nvfp4.py` verification should ERROR
-   (not "PASS") if `input_global_scale` coverage falls below a threshold
-   (e.g., <95% of Linears have non-zero scales)
-2. **Output dir bloat**: Only save BF16 weights for un-quantized layers;
-   don't duplicate compressed weights as BF16
+| Metric | Value |
+|--------|-------|
+| Calibration samples used | 979 (full corpus) |
+| Linears quantized to W4A4 | **1320/1320 (100%)** |
+| IGS coverage | 100% — 0 near-zero garbage |
+| Activation max distribution | min 3.58, p25 7.31, median 14.63, p75 29.13, **max 8896.0** |
+| Total calibration time | 564s (9.4 min) — vs the original "1–4 GPU-hr" estimate |
+| Output size | 5.99 GB (4068 MB packed weights + 509 MB weight_scales + 5.3 KB IGS + 1407 MB BF16 other) |
+| Modules kept BF16 | lm_head, all RMSNorms, all routers, 160 CCA projections (`qkv.{linear_q,linear_k,val_proj1,val_proj2}`) |
+
+**Known outlier**: one Linear hits max-abs activation of 8896 (IGS = 1483).
+Likely an `o_proj` or `down_proj` per the Week 3 plan's outlier note. Will be
+addressed at Week 3 if accuracy testing reveals it as a hot spot
+(SmoothQuant-style rotation or per-layer ignore).
 
 | Task | Status | Notes |
 |------|--------|-------|
 | Build padding-free 1024-prompt calibration corpus | ✅ | 979 samples, 8 sources, 0.006% pad ratio |
 | Extend quantize script with `--scheme w4a4` | ✅ | `scripts/quantize_zaya_ct_nvfp4.py` |
-| W4A4 dry-run on 4 layers + 8 cal samples | 🟡 | FAILED — CPU calibration broken for Zaya |
-| Implement layer-wise GPU calibration (~150 LOC) | ⬜ | Process layers one-at-a-time on GPU |
-| Fix quality gate (ERROR on low coverage) | ⬜ | Verify `input_global_scale` coverage ≥95% |
-| Fix output-dir bloat (don't duplicate BF16) | ⬜ | Only save raw BF16 for un-quantized layers |
-| Full W4A4 quantization on all 80 layers | ⬜ | Blocked on GPU calibration |
-| Integrate W4A4 with CUTLASS SM120 kernel | ⬜ | CUTLASS SM120 natively supports W4A4 |
+| W4A4 dry-run (CPU baseline) | 🟡 | Historical failure — root cause was NaN forward-wrapper, not CPU |
+| Implement layer-wise GPU calibration | ✅ | `calibrate_input_global_scales_layerwise`, ~210 LOC |
+| Restore plain forward after `apply_quantization_config` | ✅ | Memory: `gotcha_compressed_tensors_calibration.md` |
+| Empty-tensor hook skip (MoE expert sparsity) | ✅ | Two-line fix; both calibration functions |
+| Quality gate (ERROR on low coverage) | ✅ | Errors when `nonzero_igs / expected_igs < 0.95` |
+| Output-dir bloat fix | ✅ | 18.56 GB → 1.32 GB dry-run, full save = 5.99 GB |
+| Fix CCA ignore regex | ✅ | `re:.*cca.*` → `re:.*qkv.*` (160 CCA Linears now BF16) |
+| Full W4A4 quantization on all 80 layers | ✅ | 1320/1320 IGS at 100% coverage |
+| Integrate W4A4 with CUTLASS SM120 kernel | ⬜ | Week 2 — wire loader to `CutlassNvFp4LinearKernel`, force VLLM_NVFP4_GEMM_BACKEND=cutlass |
 
 ---
 

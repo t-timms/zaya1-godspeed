@@ -70,16 +70,17 @@ DRY_RUN_LAYERS = 2
 DRY_RUN_LAYERS_W4A4 = 4  # need a few more for hook coverage to make sense
 FP4_E2M1_MAX = 6.0  # max magnitude representable in FP4 E2M1 — divisor for scales
 
-# W4A4 layers that MUST stay BF16 (regex patterns for compressed_tensors ignore list)
+# W4A4 layers that MUST stay BF16 (regex patterns for compressed_tensors
+# ignore list). compressed_tensors matches against module *paths* from
+# named_modules(), not class names — so the CCA pattern must target the
+# `qkv` attribute that ZayaAttention uses for its CCA submodule (paths look
+# like `model.layers.0.self_attn.qkv.linear_q`). The earlier `re:.*cca.*`
+# matched nothing and silently quantized 160 CCA projections to W4A4.
 W4A4_IGNORE_PATTERNS = [
     "lm_head",            # tied to embed_tokens, BF16
     "re:.*router.*",      # MoE router (size_n=17, doesn't fit FP4 grid cleanly)
     "re:.*norm.*",        # RMSNorm
-    "re:.*cca.*",         # CCA cross-coder attention (use_figma overlay)
-    "re:.*mamba.*",       # mamba SSM state ops
-    "re:.*conv1d.*",      # CCA conv1d
-    "re:.*balancing_biases.*",  # MoE load balancing bias
-    "re:.*res_scale.*",   # residual scale
+    "re:.*qkv.*",         # CCA Q/K/V projections (4 Linears × 40 ATT layers = 160)
 ]
 
 
@@ -134,6 +135,10 @@ def calibrate_input_global_scales(
                 return
             x = args[0]
             if x is None or not isinstance(x, torch.Tensor):
+                return
+            # Skip empty inputs (e.g. MoE experts that received zero routed
+            # tokens this batch — x has shape (0, hidden_dim) and .max() fails).
+            if x.numel() == 0:
                 return
             with torch.no_grad():
                 cur_max = float(x.detach().float().abs().max().item())
@@ -215,6 +220,257 @@ def calibrate_input_global_scales(
                        len(missing), missing[:5])
 
     return activation_max
+
+
+def calibrate_input_global_scales_layerwise(
+    model: Any,
+    calibration_tensor: Any,
+    batch_size: int = 1,
+    num_samples: int | None = None,
+    device: str = "cuda:0",
+    max_layer: int | None = None,
+    log_every_layer: int = 5,
+) -> dict[str, float]:
+    """Layer-wise GPU calibration for Zaya. Works around two issues with the
+    naive ``calibrate_input_global_scales``:
+
+    - Zaya's CCA attention calls CUDA-only primitives → full-model CPU forward
+      crashes (silently caught by the prior implementation, leaving 99% of
+      Linears with zero observations).
+    - 8B BF16 model (~16 GB) doesn't fit alongside activations in 16 GB VRAM
+      → full-model GPU load isn't viable either.
+
+    Algorithm:
+      1. Move ``embed_tokens`` (+ rotary, + final_norm) to GPU. Embed all
+         calibration samples on GPU, cache initial hidden_states to CPU.
+      2. For each decoder layer 0..max_layer:
+         a. Move layer to GPU
+         b. Register forward-pre-hooks on every quantized Linear in this layer
+         c. For each cached sample state (hidden, residual, router), move to
+            GPU, run layer forward, cache new state to CPU
+         d. Remove hooks, move layer back to CPU, free VRAM
+      3. Compute ``input_global_scale = max_act / FP4_E2M1_MAX`` per Linear
+         and attach as a ``torch.nn.Parameter``.
+
+    Model must already be on CPU with ``quantization_scheme`` attached to each
+    target Linear (i.e. ``apply_quantization_config`` has been run).
+
+    Returns the raw max-activation dict (keyed by full module name) for
+    diagnostics. Hooks are removed before return.
+    """
+    import time
+
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("Layer-wise GPU calibration requires CUDA")
+
+    dev = torch.device(device)
+
+    activation_max: dict[str, float] = {}
+
+    def _make_pre_hook(mod_name: str) -> Callable:
+        def _pre_hook(_mod: Any, args: tuple[Any, ...]) -> None:
+            if not args:
+                return
+            x = args[0]
+            if x is None or not isinstance(x, torch.Tensor):
+                return
+            # Skip empty inputs (MoE experts that received zero routed tokens
+            # this batch — x has shape (0, hidden_dim) and .max() fails).
+            if x.numel() == 0:
+                return
+            with torch.no_grad():
+                cur_max = float(x.detach().float().abs().max().item())
+            prev = activation_max.get(mod_name, 0.0)
+            if cur_max > prev:
+                activation_max[mod_name] = cur_max
+        return _pre_hook
+
+    if isinstance(calibration_tensor, (str, os.PathLike)):
+        calibration_tensor = torch.load(calibration_tensor)
+
+    n_total = calibration_tensor.shape[0]
+    n = n_total if num_samples is None else min(num_samples, n_total)
+    seq_len = calibration_tensor.shape[1]
+    logger.info("Layer-wise calibration: %d/%d samples × %d tokens, batch=%d",
+                n, n_total, seq_len, batch_size)
+
+    # ── Walk the model: embed, layers list, rotary modules ─────
+    base = model.model if hasattr(model, "model") else model
+    embed = base.embed_tokens
+    layers = base.layers
+    rotary = getattr(base, "rotary_emb", None)
+    swa_rotary = getattr(base, "swa_rotary_emb", None)
+    swa_layers = getattr(model.config, "swa_layers", None)
+
+    num_layers = len(layers)
+    if max_layer is None:
+        max_layer = num_layers
+    max_layer = min(max_layer, num_layers)
+    logger.info("Processing layers 0..%d (of %d total)", max_layer - 1, num_layers)
+
+    # ── Pre-compute shared per-sample state on GPU ─────────────
+    # All calibration samples are [1, seq_len] int with no padding, so
+    # position_ids, causal_mask, and rotary outputs are identical across
+    # samples. Compute once.
+    embed.to(dev)
+    if rotary is not None:
+        rotary.to(dev)
+    if swa_rotary is not None:
+        swa_rotary.to(dev)
+
+    with torch.no_grad():
+        # Embed all samples in batches → list of CPU bf16 [batch, seq, hidden]
+        hidden_states_cpu: list[torch.Tensor] = []
+        t0 = time.time()
+        for i in range(0, n, batch_size):
+            end = min(i + batch_size, n)
+            batch_ids = calibration_tensor[i:end].to(dev)
+            h = embed(batch_ids)
+            hidden_states_cpu.append(h.detach().cpu())
+        logger.info("Embedded %d samples in %.1fs", n, time.time() - t0)
+
+        # Shared position state. All calibration samples are [1, seq_len] with
+        # no padding, so position_ids / cache_position / rotary outputs are
+        # identical across samples. cca_mask=None when there's no padding.
+        dummy_h = hidden_states_cpu[0].to(dev)
+        cache_position = torch.arange(seq_len, device=dev)
+        position_ids = cache_position.unsqueeze(0)
+        position_embeddings = rotary(dummy_h, position_ids) if rotary is not None else None
+        swa_position_embeddings = (
+            swa_rotary(dummy_h, position_ids) if swa_rotary is not None else None
+        )
+        del dummy_h
+
+    embed.to("cpu")
+    if rotary is not None:
+        rotary.to("cpu")
+    if swa_rotary is not None:
+        swa_rotary.to("cpu")
+    torch.cuda.empty_cache()
+
+    # Per-sample state: (hidden, residual, prev_router_hidden_states) — all CPU.
+    # `residual` and `prev_router_hidden_states` start as None for every sample.
+    residual_cpu: list[Any] = [None] * len(hidden_states_cpu)
+    router_cpu: list[Any] = [None] * len(hidden_states_cpu)
+
+    # ── Iterate layers ─────────────────────────────────────────
+    t_start = time.time()
+    for layer_idx in range(max_layer):
+        layer = layers[layer_idx]
+        layer.to(dev)
+
+        # Pick rotary embeddings (sliding-window vs full)
+        if swa_position_embeddings is not None and swa_layers is not None:
+            emb_to_use = (position_embeddings if swa_layers[layer_idx] == 0
+                          else swa_position_embeddings)
+        else:
+            emb_to_use = position_embeddings
+
+        # Register hooks on quantized Linears within this layer
+        local_hooks = []
+        for name, mod in layer.named_modules():
+            if _is_quantized_linear(mod):
+                full_name = f"model.layers.{layer_idx}.{name}" if name else f"model.layers.{layer_idx}"
+                local_hooks.append(mod.register_forward_pre_hook(_make_pre_hook(full_name)))
+
+        # Forward each sample through this layer
+        with torch.no_grad():
+            for sample_idx in range(len(hidden_states_cpu)):
+                h = hidden_states_cpu[sample_idx].to(dev)
+                r = residual_cpu[sample_idx]
+                if r is not None:
+                    r = r.to(dev)
+                pr = router_cpu[sample_idx]
+                if pr is not None:
+                    pr = pr.to(dev)
+
+                try:
+                    layer_outputs, r_new, pr_new = layer(
+                        h,
+                        r,
+                        attention_mask=None,
+                        position_ids=position_ids,
+                        past_key_values=None,
+                        output_attentions=False,
+                        use_cache=False,
+                        cache_position=cache_position,
+                        position_embeddings=emb_to_use,
+                        prev_router_hidden_states=pr,
+                        cca_mask=None,
+                    )
+                except torch.cuda.OutOfMemoryError as oom:
+                    logger.error("OOM at layer %d sample %d: %s", layer_idx, sample_idx, oom)
+                    raise
+
+                h_new = layer_outputs[0]
+                hidden_states_cpu[sample_idx] = h_new.detach().cpu()
+                residual_cpu[sample_idx] = r_new.detach().cpu() if r_new is not None else None
+                router_cpu[sample_idx] = pr_new.detach().cpu() if pr_new is not None else None
+
+                del h, r, pr, h_new, r_new, pr_new, layer_outputs
+
+        for hk in local_hooks:
+            hk.remove()
+        layer.to("cpu")
+        torch.cuda.empty_cache()
+
+        if (layer_idx + 1) % log_every_layer == 0 or layer_idx == max_layer - 1:
+            elapsed = time.time() - t_start
+            done = layer_idx + 1
+            eta = elapsed * (max_layer - done) / max(done, 1)
+            observed = sum(1 for v in activation_max.values() if v > 0)
+            logger.info("  layer %d/%d done (%.1fs elapsed, ETA %.0fs, %d hooks fired)",
+                        done, max_layer, elapsed, eta, observed)
+
+    logger.info("Layer-wise forward complete in %.0fs", time.time() - t_start)
+
+    # ── Set input_global_scale per quantized Linear ────────────
+    # Only set on modules WITHIN the processed layer range so dry-run output
+    # matches dry-run expectations.
+    target_modules: list[tuple[str, Any]] = []
+    for name, mod in model.named_modules():
+        if not _is_quantized_linear(mod):
+            continue
+        layer_idx = _extract_layer_idx(name)
+        if layer_idx is not None and layer_idx >= max_layer:
+            continue
+        target_modules.append((name, mod))
+
+    import torch as _torch
+    missing = []
+    set_count = 0
+    for name, mod in target_modules:
+        max_act = activation_max.get(name, 0.0)
+        if max_act <= 0:
+            missing.append(name)
+            continue
+        scale = max_act / FP4_E2M1_MAX
+        mod.input_global_scale = _torch.nn.Parameter(
+            _torch.tensor(scale, dtype=_torch.float32), requires_grad=False
+        )
+        set_count += 1
+
+    logger.info("Set input_global_scale on %d/%d Linears (%d had zero activations)",
+                set_count, len(target_modules), len(missing))
+    if missing:
+        logger.warning("Missing observations on %d modules — first few: %s",
+                       len(missing), missing[:5])
+
+    return activation_max
+
+
+def _extract_layer_idx(module_name: str) -> int | None:
+    """Pull the integer N from a name like 'model.layers.N.foo.bar'."""
+    parts = module_name.split(".")
+    for i, p in enumerate(parts):
+        if p == "layers" and i + 1 < len(parts):
+            try:
+                return int(parts[i + 1])
+            except ValueError:
+                return None
+    return None
 
 
 def run_w4a4(args: Any) -> int:
@@ -311,6 +567,28 @@ def run_w4a4(args: Any) -> int:
     apply_quantization_config(model, config)
     logger.info("Quantization config applied (NVFP4 W4A4 scheme + ignore list)")
 
+    # apply_quantization_config replaces each quantized Linear's forward with a
+    # fake-quant wrapper that uses weight_scale (initialized to NaN) and
+    # input_global_scale (initialized to ~0). With those defaults the wrapper
+    # outputs NaN, which silently corrupts downstream activations and means
+    # only the FIRST layer of pre-hooks observes real values — every hook past
+    # the first quantized Linear sees zeros/NaN.
+    #
+    # Restore plain nn.Linear.forward on each quantized Linear so calibration
+    # runs in pure BF16. We compute scales after this; the fake-quant wrapper
+    # is no longer needed because the model is never forwarded post-calibration
+    # (we extract weights for the compressor and save).
+    import types
+
+    import torch.nn as _nn
+    restored = 0
+    for _name, _mod in model.named_modules():
+        if isinstance(_mod, _nn.Linear) and hasattr(_mod, "quantization_scheme"):
+            _mod.forward = types.MethodType(_nn.Linear.forward, _mod)
+            restored += 1
+    logger.info("Restored plain Linear.forward on %d quantized Linears for BF16 calibration",
+                restored)
+
     # ── Activation calibration ──────────────────────────────
     logger.info("Loading calibration tensor: %s", cal_path)
     cal_tensor = torch.load(cal_path)
@@ -321,11 +599,16 @@ def run_w4a4(args: Any) -> int:
         cal_tensor = cal_tensor[: min(8, cal_tensor.shape[0])]
         logger.info("DRY RUN: truncated calibration to %d samples", cal_tensor.shape[0])
 
-    activation_max = calibrate_input_global_scales(
+    # Layer-wise GPU calibration — full-model CPU forward crashes for Zaya
+    # (CCA attention requires CUDA). 8B BF16 doesn't fit in 16 GB VRAM as a
+    # whole, so we move one decoder layer at a time on/off GPU.
+    max_layer = DRY_RUN_LAYERS_W4A4 if args.dry_run else None
+    activation_max = calibrate_input_global_scales_layerwise(
         model=model,
         calibration_tensor=cal_tensor,
         batch_size=args.calibration_batch_size,
         num_samples=args.calibration_num_samples,
+        max_layer=max_layer,
     )
 
     # Diagnostic: distribution of input_global_scales
@@ -418,17 +701,28 @@ def run_w4a4(args: Any) -> int:
                 linear_count, time.time() - t0, skipped)
 
     # ── Build output state dict ─────────────────────────────
-    # Same shape as W4A16 path, but with input_global_scale per Linear
+    # Same shape as W4A16 path, but with input_global_scale per Linear.
+    # Dry-run bloat fix: parameters belonging to layers beyond the dry-run
+    # cutoff (norms, routers, full expert MLPs, etc.) get dropped instead of
+    # saved as raw BF16. Saving them duplicates ~16 GB of unquantized weights
+    # and gives a misleading 18 GB dry-run output.
     output_state: dict[str, torch.Tensor] = {}
     packed_total = 0
     scale_total = 0
     igs_total = 0
     other_total = 0
-    device = torch.device("cpu")  # save from CPU — model may be partially offloaded
+    dropped_dryrun = 0
+    dryrun_cutoff = DRY_RUN_LAYERS_W4A4 if args.dry_run else None
 
     for pname, param in model.named_parameters():
         module_name = ".".join(pname.split(".")[:-1])
         param_short = pname.split(".")[-1]
+
+        if dryrun_cutoff is not None:
+            li = _extract_layer_idx(pname)
+            if li is not None and li >= dryrun_cutoff:
+                dropped_dryrun += 1
+                continue
 
         if module_name in compressed_params:
             if param_short == "weight":
@@ -453,6 +747,10 @@ def run_w4a4(args: Any) -> int:
         if param.device.type != "meta":
             output_state[pname] = param.detach().cpu()
             other_total += param.numel() * param.element_size()
+
+    if dropped_dryrun:
+        logger.info("DRY RUN: dropped %d params from layers ≥%d (avoids ~16 GB BF16 bloat)",
+                    dropped_dryrun, dryrun_cutoff)
 
     # Add every compressed-param tensor (including input_global_scale) that
     # didn't already get pulled in by the named_parameters loop.
@@ -545,11 +843,45 @@ def run_w4a4(args: Any) -> int:
     verify = st.load_file(str(output_dir / "model.safetensors"), device="cpu")
     igs_keys = [k for k in verify if "input_global_scale" in k]
     logger.info("input_global_scale keys present: %d", len(igs_keys))
-    if igs_keys:
-        sample_igs = verify[igs_keys[0]]
-        logger.info("Sample IGS: %s = %s (dtype=%s)", igs_keys[0],
-                    sample_igs.item() if sample_igs.numel() == 1 else "tensor",
-                    sample_igs.dtype)
+
+    # Quality gate: input_global_scale coverage must be ≥95% of compressed Linears.
+    # The dry-run failure mode that this catches: forward pass crashes silently,
+    # ~4 of ~1480 modules get scales (coverage <0.3%), verification "passes"
+    # because IGS keys exist with garbage values (8.97e-44).
+    expected_igs = linear_count
+    coverage = (len(igs_keys) / expected_igs) if expected_igs > 0 else 0.0
+    nonzero_igs = 0
+    near_zero_igs = 0
+    sample_vals: list[float] = []
+    for k in igs_keys:
+        v = verify[k]
+        if v.numel() != 1:
+            continue
+        val = float(v.item())
+        if abs(val) > 1e-12:
+            nonzero_igs += 1
+            if len(sample_vals) < 5:
+                sample_vals.append(val)
+        if abs(val) < 1e-30:
+            near_zero_igs += 1
+    nonzero_coverage = (nonzero_igs / expected_igs) if expected_igs > 0 else 0.0
+
+    logger.info("IGS coverage: %d/%d keys present (%.1f%%), %d nonzero (%.1f%%), "
+                "%d near-zero garbage", len(igs_keys), expected_igs, coverage * 100,
+                nonzero_igs, nonzero_coverage * 100, near_zero_igs)
+    if sample_vals:
+        logger.info("Sample IGS values: %s", ["%.4f" % v for v in sample_vals])
+
+    # Threshold: ≥95% of compressed Linears must have a non-zero input_global_scale.
+    # Anything lower means calibration didn't reach those modules.
+    coverage_threshold = 0.95
+    if nonzero_coverage < coverage_threshold:
+        logger.error("QUALITY GATE FAILED: input_global_scale coverage %.1f%% < %.0f%% threshold.",
+                     nonzero_coverage * 100, coverage_threshold * 100)
+        logger.error("This indicates calibration forward pass did not exercise most quantized "
+                     "Linears. Common causes: model on wrong device, layer-wise iteration "
+                     "stopped early, or hooks failed to register.")
+        return 2
 
     logger.info("")
     logger.info("=" * 60)

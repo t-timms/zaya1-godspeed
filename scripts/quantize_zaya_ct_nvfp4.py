@@ -77,16 +77,17 @@ FP4_E2M1_MAX = 6.0  # max magnitude representable in FP4 E2M1 — divisor for sc
 # like `model.layers.0.self_attn.qkv.linear_q`). The earlier `re:.*cca.*`
 # matched nothing and silently quantized 160 CCA projections to W4A4.
 W4A4_IGNORE_PATTERNS = [
-    "lm_head",            # tied to embed_tokens, BF16
-    "re:.*router.*",      # MoE router (size_n=17, doesn't fit FP4 grid cleanly)
-    "re:.*norm.*",        # RMSNorm
-    "re:.*qkv.*",         # CCA Q/K/V projections (4 Linears × 40 ATT layers = 160)
+    "lm_head",  # tied to embed_tokens, BF16
+    "re:.*router.*",  # MoE router (size_n=17, doesn't fit FP4 grid cleanly)
+    "re:.*norm.*",  # RMSNorm
+    "re:.*qkv.*",  # CCA Q/K/V projections (4 Linears × 40 ATT layers = 160)
 ]
 
 
 def _is_quantized_linear(module: Any) -> bool:
     """True iff the module has a quantization_scheme with both weight + input quant."""
     import torch
+
     qs = getattr(module, "quantization_scheme", None)
     if qs is None:
         return False
@@ -119,8 +120,7 @@ def calibrate_input_global_scales(
     activation_max: dict[str, float] = {}
 
     target_modules: list[tuple[str, Any]] = [
-        (name, mod) for name, mod in model.named_modules()
-        if _is_quantized_linear(mod)
+        (name, mod) for name, mod in model.named_modules() if _is_quantized_linear(mod)
     ]
 
     if not target_modules:
@@ -145,6 +145,7 @@ def calibrate_input_global_scales(
             prev = activation_max.get(mod_name, 0.0)
             if cur_max > prev:
                 activation_max[mod_name] = cur_max
+
         return _pre_hook
 
     hooks = []
@@ -159,12 +160,12 @@ def calibrate_input_global_scales(
 
         n_total = calibration_tensor.shape[0]
         n = n_total if num_samples is None else min(num_samples, n_total)
-        logger.info("Forward pass over %d/%d calibration samples (batch=%d)",
-                    n, n_total, batch_size)
+        logger.info("Forward pass over %d/%d calibration samples (batch=%d)", n, n_total, batch_size)
 
         device = next(model.parameters()).device
 
         import time
+
         t0 = time.time()
         observed_count = 0
         with torch.no_grad():
@@ -174,8 +175,12 @@ def calibrate_input_global_scales(
                 try:
                     _ = model(input_ids=batch, use_cache=False)
                 except torch.cuda.OutOfMemoryError as oom:
-                    logger.error("OOM at sample %d (batch_size=%d). Reduce batch_size or "
-                                 "tighten max_memory cap. Error: %s", i, batch_size, oom)
+                    logger.error(
+                        "OOM at sample %d (batch_size=%d). Reduce batch_size or tighten max_memory cap. Error: %s",
+                        i,
+                        batch_size,
+                        oom,
+                    )
                     raise
                 except Exception as e:
                     # Non-OOM forward errors: log and skip the sample rather than abort
@@ -187,9 +192,15 @@ def calibrate_input_global_scales(
                     elapsed = time.time() - t0
                     rate = done / max(elapsed, 0.001)
                     eta = (n - done) / max(rate, 0.001)
-                    logger.info("  %d/%d samples done (%.2fs/sample, ETA %.0fs, %d/%d hooks live)",
-                                done, n, elapsed / max(done, 1), eta,
-                                observed_count, len(target_modules))
+                    logger.info(
+                        "  %d/%d samples done (%.2fs/sample, ETA %.0fs, %d/%d hooks live)",
+                        done,
+                        n,
+                        elapsed / max(done, 1),
+                        eta,
+                        observed_count,
+                        len(target_modules),
+                    )
         logger.info("Calibration forward complete in %.0fs", time.time() - t0)
     finally:
         for h in hooks:
@@ -208,16 +219,18 @@ def calibrate_input_global_scales(
         # this as input_global_scale_inv = 1 / input_global_scale during
         # process_weights_after_loading.
         import torch
-        mod.input_global_scale = torch.nn.Parameter(
-            torch.tensor(scale, dtype=torch.float32), requires_grad=False
-        )
+
+        mod.input_global_scale = torch.nn.Parameter(torch.tensor(scale, dtype=torch.float32), requires_grad=False)
         set_count += 1
 
-    logger.info("Set input_global_scale on %d/%d Linears (%d had zero activations)",
-                set_count, len(target_modules), len(missing))
+    logger.info(
+        "Set input_global_scale on %d/%d Linears (%d had zero activations)",
+        set_count,
+        len(target_modules),
+        len(missing),
+    )
     if missing:
-        logger.warning("Missing observations on %d modules — first few: %s",
-                       len(missing), missing[:5])
+        logger.warning("Missing observations on %d modules — first few: %s", len(missing), missing[:5])
 
     return activation_max
 
@@ -285,6 +298,7 @@ def calibrate_input_global_scales_layerwise(
             prev = activation_max.get(mod_name, 0.0)
             if cur_max > prev:
                 activation_max[mod_name] = cur_max
+
         return _pre_hook
 
     if isinstance(calibration_tensor, (str, os.PathLike)):
@@ -293,8 +307,7 @@ def calibrate_input_global_scales_layerwise(
     n_total = calibration_tensor.shape[0]
     n = n_total if num_samples is None else min(num_samples, n_total)
     seq_len = calibration_tensor.shape[1]
-    logger.info("Layer-wise calibration: %d/%d samples × %d tokens, batch=%d",
-                n, n_total, seq_len, batch_size)
+    logger.info("Layer-wise calibration: %d/%d samples × %d tokens, batch=%d", n, n_total, seq_len, batch_size)
 
     # ── Walk the model: embed, layers list, rotary modules ─────
     base = model.model if hasattr(model, "model") else model
@@ -338,9 +351,7 @@ def calibrate_input_global_scales_layerwise(
         cache_position = torch.arange(seq_len, device=dev)
         position_ids = cache_position.unsqueeze(0)
         position_embeddings = rotary(dummy_h, position_ids) if rotary is not None else None
-        swa_position_embeddings = (
-            swa_rotary(dummy_h, position_ids) if swa_rotary is not None else None
-        )
+        swa_position_embeddings = swa_rotary(dummy_h, position_ids) if swa_rotary is not None else None
         del dummy_h
 
     embed.to("cpu")
@@ -363,8 +374,7 @@ def calibrate_input_global_scales_layerwise(
 
         # Pick rotary embeddings (sliding-window vs full)
         if swa_position_embeddings is not None and swa_layers is not None:
-            emb_to_use = (position_embeddings if swa_layers[layer_idx] == 0
-                          else swa_position_embeddings)
+            emb_to_use = position_embeddings if swa_layers[layer_idx] == 0 else swa_position_embeddings
         else:
             emb_to_use = position_embeddings
 
@@ -421,8 +431,9 @@ def calibrate_input_global_scales_layerwise(
             done = layer_idx + 1
             eta = elapsed * (max_layer - done) / max(done, 1)
             observed = sum(1 for v in activation_max.values() if v > 0)
-            logger.info("  layer %d/%d done (%.1fs elapsed, ETA %.0fs, %d hooks fired)",
-                        done, max_layer, elapsed, eta, observed)
+            logger.info(
+                "  layer %d/%d done (%.1fs elapsed, ETA %.0fs, %d hooks fired)", done, max_layer, elapsed, eta, observed
+            )
 
     logger.info("Layer-wise forward complete in %.0fs", time.time() - t_start)
 
@@ -439,6 +450,7 @@ def calibrate_input_global_scales_layerwise(
         target_modules.append((name, mod))
 
     import torch as _torch
+
     missing = []
     set_count = 0
     for name, mod in target_modules:
@@ -447,16 +459,17 @@ def calibrate_input_global_scales_layerwise(
             missing.append(name)
             continue
         scale = max_act / FP4_E2M1_MAX
-        mod.input_global_scale = _torch.nn.Parameter(
-            _torch.tensor(scale, dtype=_torch.float32), requires_grad=False
-        )
+        mod.input_global_scale = _torch.nn.Parameter(_torch.tensor(scale, dtype=_torch.float32), requires_grad=False)
         set_count += 1
 
-    logger.info("Set input_global_scale on %d/%d Linears (%d had zero activations)",
-                set_count, len(target_modules), len(missing))
+    logger.info(
+        "Set input_global_scale on %d/%d Linears (%d had zero activations)",
+        set_count,
+        len(target_modules),
+        len(missing),
+    )
     if missing:
-        logger.warning("Missing observations on %d modules — first few: %s",
-                       len(missing), missing[:5])
+        logger.warning("Missing observations on %d modules — first few: %s", len(missing), missing[:5])
 
     return activation_max
 
@@ -498,16 +511,25 @@ def run_w4a4(args: Any) -> int:
 
     logger.info("=" * 60)
     logger.info("STAGE 1: NVFP4 W4A4 Quantization (Path B Phase 1)")
-    logger.info("Model: %s | Output: %s | Mode: %s",
-                args.model_id, args.output_dir,
-                f"DRY RUN ({DRY_RUN_LAYERS_W4A4:d}L)" if args.dry_run else "FULL")
-    logger.info("Calibration: %s | samples: %s | batch: %d",
-                args.calibration_data,
-                args.calibration_num_samples or "all", args.calibration_batch_size)
+    logger.info(
+        "Model: %s | Output: %s | Mode: %s",
+        args.model_id,
+        args.output_dir,
+        f"DRY RUN ({DRY_RUN_LAYERS_W4A4:d}L)" if args.dry_run else "FULL",
+    )
+    logger.info(
+        "Calibration: %s | samples: %s | batch: %d",
+        args.calibration_data,
+        args.calibration_num_samples or "all",
+        args.calibration_batch_size,
+    )
     logger.info("Ignore patterns: %s", W4A4_IGNORE_PATTERNS)
-    logger.info("torch %s | CUDA: %s | %s",
-                torch.__version__, torch.cuda.is_available(),
-                torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A")
+    logger.info(
+        "torch %s | CUDA: %s | %s",
+        torch.__version__,
+        torch.cuda.is_available(),
+        torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A",
+    )
     logger.info("compressed_tensors %s", getattr(ct, "__version__", "?"))
     logger.info("=" * 60)
 
@@ -517,8 +539,7 @@ def run_w4a4(args: Any) -> int:
 
     cal_path = Path(args.calibration_data)
     if not cal_path.exists():
-        logger.error("Calibration data not found: %s. Run scripts/build_calibration_data.py first.",
-                     cal_path)
+        logger.error("Calibration data not found: %s. Run scripts/build_calibration_data.py first.", cal_path)
         return 1
 
     # ── Load model on CPU ───────────────────────────────────
@@ -541,8 +562,9 @@ def run_w4a4(args: Any) -> int:
         device_map="cpu",
         trust_remote_code=True,
     )
-    logger.info("Model loaded in %.0fs | Params: %.1fB", time.time() - t0,
-                sum(p.numel() for p in model.parameters()) / 1e9)
+    logger.info(
+        "Model loaded in %.0fs | Params: %.1fB", time.time() - t0, sum(p.numel() for p in model.parameters()) / 1e9
+    )
 
     # Generation config sanity (matches W4A16 path)
     gc = model.generation_config
@@ -553,10 +575,14 @@ def run_w4a4(args: Any) -> int:
 
     # ── Apply NVFP4 (W4A4) scheme with ignore list ──────────
     scheme = preset_name_to_scheme("NVFP4", targets=["Linear"])
-    logger.info("Scheme: W=%s/g=%s, A=%s/g=%s (dyn=%s)",
-                scheme.weights.num_bits, scheme.weights.group_size,
-                scheme.input_activations.num_bits, scheme.input_activations.group_size,
-                scheme.input_activations.dynamic)
+    logger.info(
+        "Scheme: W=%s/g=%s, A=%s/g=%s (dyn=%s)",
+        scheme.weights.num_bits,
+        scheme.weights.group_size,
+        scheme.input_activations.num_bits,
+        scheme.input_activations.group_size,
+        scheme.input_activations.dynamic,
+    )
 
     config = QuantizationConfig(
         quant_method="compressed-tensors",
@@ -581,13 +607,13 @@ def run_w4a4(args: Any) -> int:
     import types
 
     import torch.nn as _nn
+
     restored = 0
     for _name, _mod in model.named_modules():
         if isinstance(_mod, _nn.Linear) and hasattr(_mod, "quantization_scheme"):
             _mod.forward = types.MethodType(_nn.Linear.forward, _mod)
             restored += 1
-    logger.info("Restored plain Linear.forward on %d quantized Linears for BF16 calibration",
-                restored)
+    logger.info("Restored plain Linear.forward on %d quantized Linears for BF16 calibration", restored)
 
     # ── Activation calibration ──────────────────────────────
     logger.info("Loading calibration tensor: %s", cal_path)
@@ -614,11 +640,17 @@ def run_w4a4(args: Any) -> int:
     # Diagnostic: distribution of input_global_scales
     if activation_max:
         import statistics as stats
+
         vals = sorted(activation_max.values())
         logger.info("Activation max distribution across Linears:")
-        logger.info("  min: %.4f | p25: %.4f | median: %.4f | p75: %.4f | max: %.4f",
-                    vals[0], vals[len(vals) // 4], stats.median(vals),
-                    vals[3 * len(vals) // 4], vals[-1])
+        logger.info(
+            "  min: %.4f | p25: %.4f | median: %.4f | p75: %.4f | max: %.4f",
+            vals[0],
+            vals[len(vals) // 4],
+            stats.median(vals),
+            vals[3 * len(vals) // 4],
+            vals[-1],
+        )
 
     # ── Compute weight scales (same logic as W4A16) ─────────
     logger.info("Computing per-group weight scales...")
@@ -659,8 +691,7 @@ def run_w4a4(args: Any) -> int:
         module.weight_scale.data = scales.to(torch.bfloat16)
         calibrated_w += 1
 
-    logger.info("Calibrated %d weight scales (%d layers skipped by dry-run)",
-                calibrated_w, len(skipped_layers))
+    logger.info("Calibrated %d weight scales (%d layers skipped by dry-run)", calibrated_w, len(skipped_layers))
 
     # ── Compress each quantized module ──────────────────────
     compressed_params: dict[str, dict[str, torch.Tensor]] = {}
@@ -697,8 +728,7 @@ def run_w4a4(args: Any) -> int:
         if igs is not None:
             compressed_params[name]["input_global_scale"] = igs.data.to(torch.float32).cpu()
 
-    logger.info("Compressed %d Linear modules in %.0fs (skipped %d)",
-                linear_count, time.time() - t0, skipped)
+    logger.info("Compressed %d Linear modules in %.0fs (skipped %d)", linear_count, time.time() - t0, skipped)
 
     # ── Build output state dict ─────────────────────────────
     # Same shape as W4A16 path, but with input_global_scale per Linear.
@@ -749,8 +779,9 @@ def run_w4a4(args: Any) -> int:
             other_total += param.numel() * param.element_size()
 
     if dropped_dryrun:
-        logger.info("DRY RUN: dropped %d params from layers ≥%d (avoids ~16 GB BF16 bloat)",
-                    dropped_dryrun, dryrun_cutoff)
+        logger.info(
+            "DRY RUN: dropped %d params from layers ≥%d (avoids ~16 GB BF16 bloat)", dropped_dryrun, dryrun_cutoff
+        )
 
     # Add every compressed-param tensor (including input_global_scale) that
     # didn't already get pulled in by the named_parameters loop.
@@ -764,15 +795,20 @@ def run_w4a4(args: Any) -> int:
                 elif "input_global_scale" in key:
                     igs_total += tensor.numel() * tensor.element_size()
 
-    logger.info("Output: %d params | packed: %.0f MB | weight_scales: %.0f MB | "
-                "input_global_scale: %.1f KB | other: %.0f MB",
-                len(output_state), packed_total / 1e6, scale_total / 1e6,
-                igs_total / 1e3, other_total / 1e6)
+    logger.info(
+        "Output: %d params | packed: %.0f MB | weight_scales: %.0f MB | input_global_scale: %.1f KB | other: %.0f MB",
+        len(output_state),
+        packed_total / 1e6,
+        scale_total / 1e6,
+        igs_total / 1e3,
+        other_total / 1e6,
+    )
 
     # ── Save ────────────────────────────────────────────────
     output_dir = Path(args.output_dir)
     if output_dir.exists():
         import shutil
+
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
 
@@ -781,6 +817,44 @@ def run_w4a4(args: Any) -> int:
 
     model.config.save_pretrained(str(output_dir))
     model.generation_config.save_pretrained(str(output_dir))
+
+    # vLLM's AutoTokenizer path needs tokenizer files in the checkpoint dir.
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
+    tokenizer.save_pretrained(str(output_dir))
+
+    # vLLM compressed-tensors loader keys off config.json's `quantization_config`
+    # block; HF save_pretrained omits it, so we merge it in here.
+    config_path = output_dir / "config.json"
+    with open(config_path) as cf:
+        config_dict = json.load(cf)
+    config_dict["quantization_config"] = {
+        "quant_method": "compressed-tensors",
+        "format": "nvfp4-pack-quantized",
+        "config_groups": {
+            "group_0": {
+                "weights": {
+                    "num_bits": 4,
+                    "type": "float",
+                    "strategy": "tensor_group",
+                    "group_size": 16,
+                    "symmetric": True,
+                    "dynamic": False,
+                },
+                "input_activations": {
+                    "num_bits": 4,
+                    "type": "float",
+                    "strategy": "tensor_group",
+                    "group_size": 16,
+                    "symmetric": True,
+                    "dynamic": False,
+                },
+                "targets": ["Linear"],
+            }
+        },
+        "ignore": list(W4A4_IGNORE_PATTERNS),
+    }
+    with open(config_path, "w") as cf:
+        json.dump(config_dict, cf, indent=2)
 
     st.save_file(output_state, str(output_dir / "model.safetensors"))
     index: dict[str, Any] = {
@@ -791,9 +865,7 @@ def run_w4a4(args: Any) -> int:
         json.dump(index, f)
 
     # Quantization manifest
-    total_bytes = sum(
-        f.stat().st_size for f in output_dir.rglob("*") if f.is_file()
-    )
+    total_bytes = sum(f.stat().st_size for f in output_dir.rglob("*") if f.is_file())
     manifest = {
         "model": "Zyphra/ZAYA1-8B",
         "quantization": {
@@ -819,8 +891,9 @@ def run_w4a4(args: Any) -> int:
             "data_path": str(cal_path),
             "num_samples_used": args.calibration_num_samples or cal_tensor.shape[0],
             "batch_size": args.calibration_batch_size,
-            "linears_calibrated": sum(1 for n, _ in [(k, v) for k, v in compressed_params.items()
-                                                     if "input_global_scale" in v]),
+            "linears_calibrated": sum(
+                1 for n, _ in [(k, v) for k, v in compressed_params.items() if "input_global_scale" in v]
+            ),
         },
         "hardware": {
             "gpu": torch.cuda.get_device_name(0),
@@ -834,8 +907,7 @@ def run_w4a4(args: Any) -> int:
     with open(output_dir / "quantization_manifest.json", "w") as f:
         json.dump(manifest, f, indent=2)
 
-    logger.info("Saved in %.0fs | Total: %.0f MB (%.2f GB)",
-                time.time() - t0, total_bytes / 1e6, total_bytes / 1e9)
+    logger.info("Saved in %.0fs | Total: %.0f MB (%.2f GB)", time.time() - t0, total_bytes / 1e6, total_bytes / 1e9)
 
     # ── Verify ──────────────────────────────────────────────
     logger.info("")
@@ -866,9 +938,15 @@ def run_w4a4(args: Any) -> int:
             near_zero_igs += 1
     nonzero_coverage = (nonzero_igs / expected_igs) if expected_igs > 0 else 0.0
 
-    logger.info("IGS coverage: %d/%d keys present (%.1f%%), %d nonzero (%.1f%%), "
-                "%d near-zero garbage", len(igs_keys), expected_igs, coverage * 100,
-                nonzero_igs, nonzero_coverage * 100, near_zero_igs)
+    logger.info(
+        "IGS coverage: %d/%d keys present (%.1f%%), %d nonzero (%.1f%%), %d near-zero garbage",
+        len(igs_keys),
+        expected_igs,
+        coverage * 100,
+        nonzero_igs,
+        nonzero_coverage * 100,
+        near_zero_igs,
+    )
     if sample_vals:
         logger.info("Sample IGS values: %s", [f"{v:.4f}" for v in sample_vals])
 
@@ -876,11 +954,16 @@ def run_w4a4(args: Any) -> int:
     # Anything lower means calibration didn't reach those modules.
     coverage_threshold = 0.95
     if nonzero_coverage < coverage_threshold:
-        logger.error("QUALITY GATE FAILED: input_global_scale coverage %.1f%% < %.0f%% threshold.",
-                     nonzero_coverage * 100, coverage_threshold * 100)
-        logger.error("This indicates calibration forward pass did not exercise most quantized "
-                     "Linears. Common causes: model on wrong device, layer-wise iteration "
-                     "stopped early, or hooks failed to register.")
+        logger.error(
+            "QUALITY GATE FAILED: input_global_scale coverage %.1f%% < %.0f%% threshold.",
+            nonzero_coverage * 100,
+            coverage_threshold * 100,
+        )
+        logger.error(
+            "This indicates calibration forward pass did not exercise most quantized "
+            "Linears. Common causes: model on wrong device, layer-wise iteration "
+            "stopped early, or hooks failed to register."
+        )
         return 2
 
     logger.info("")
@@ -898,24 +981,40 @@ def run_w4a4(args: Any) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stage 1: ZAYA1-8B → NVFP4 compressed-tensors")
-    parser.add_argument("--scheme", choices=["w4a16", "w4a4"], default="w4a16",
-                        help="Quantization scheme: w4a16 (legacy SOTA) or w4a4 (Path B Phase 1)")
+    parser.add_argument(
+        "--scheme",
+        choices=["w4a16", "w4a4"],
+        default="w4a16",
+        help="Quantization scheme: w4a16 (legacy SOTA) or w4a4 (Path B Phase 1)",
+    )
     parser.add_argument("--model-id", default=os.environ.get("ZAYA_MODEL_ID", DEFAULT_MODEL))
-    parser.add_argument("--output-dir", default=None,
-                        help=f"Output directory (default: {DEFAULT_OUTPUT} for w4a16, "
-                             f"{DEFAULT_OUTPUT_W4A4} for w4a4)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help=f"Quantize only first {DRY_RUN_LAYERS} (w4a16) / "
-                             f"{DRY_RUN_LAYERS_W4A4} (w4a4) layers")
-    parser.add_argument("--calibration-data", default=DEFAULT_CALIBRATION_DATA,
-                        help="Path to calibration_data.pt (w4a4 only). "
-                             f"Default: {DEFAULT_CALIBRATION_DATA}")
-    parser.add_argument("--calibration-num-samples", type=int, default=None,
-                        help="Cap calibration to first N samples for quick iteration. "
-                             "Default: use the entire calibration tensor.")
-    parser.add_argument("--calibration-batch-size", type=int, default=1,
-                        help="Batch size for calibration forward. Default 1 — 8B BF16 + "
-                             "1024-token activations near saturate 16 GB.")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=f"Output directory (default: {DEFAULT_OUTPUT} for w4a16, {DEFAULT_OUTPUT_W4A4} for w4a4)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=f"Quantize only first {DRY_RUN_LAYERS} (w4a16) / {DRY_RUN_LAYERS_W4A4} (w4a4) layers",
+    )
+    parser.add_argument(
+        "--calibration-data",
+        default=DEFAULT_CALIBRATION_DATA,
+        help=f"Path to calibration_data.pt (w4a4 only). Default: {DEFAULT_CALIBRATION_DATA}",
+    )
+    parser.add_argument(
+        "--calibration-num-samples",
+        type=int,
+        default=None,
+        help="Cap calibration to first N samples for quick iteration. Default: use the entire calibration tensor.",
+    )
+    parser.add_argument(
+        "--calibration-batch-size",
+        type=int,
+        default=1,
+        help="Batch size for calibration forward. Default 1 — 8B BF16 + 1024-token activations near saturate 16 GB.",
+    )
     args = parser.parse_args()
 
     # Pick a sensible default output_dir per scheme if user didn't override
@@ -941,13 +1040,19 @@ def main() -> int:
 
     logger.info("=" * 60)
     logger.info("STAGE 1: NVFP4 Compressed-Tensors Quantization (SOTA)")
-    logger.info("Model: %s | Output: %s | Mode: %s",
-                args.model_id, args.output_dir,
-                f"DRY RUN ({DRY_RUN_LAYERS:d}L)" if args.dry_run else "FULL")
+    logger.info(
+        "Model: %s | Output: %s | Mode: %s",
+        args.model_id,
+        args.output_dir,
+        f"DRY RUN ({DRY_RUN_LAYERS:d}L)" if args.dry_run else "FULL",
+    )
     logger.info("Compressor: NVFP4PackedCompressor (pack_fp4_to_uint8)")
-    logger.info("torch %s | CUDA: %s | %s",
-                torch.__version__, torch.cuda.is_available(),
-                torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A")
+    logger.info(
+        "torch %s | CUDA: %s | %s",
+        torch.__version__,
+        torch.cuda.is_available(),
+        torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A",
+    )
     logger.info("compressed_tensors %s", getattr(ct, "__version__", "?"))
     logger.info("=" * 60)
 
@@ -964,8 +1069,9 @@ def main() -> int:
         device_map="cpu",
         trust_remote_code=True,
     )
-    logger.info("Model loaded in %.0fs | Params: %.1fB", time.time() - t0,
-                sum(p.numel() for p in model.parameters()) / 1e9)
+    logger.info(
+        "Model loaded in %.0fs | Params: %.1fB", time.time() - t0, sum(p.numel() for p in model.parameters()) / 1e9
+    )
 
     # Fix generation_config for save
     gc = model.generation_config
@@ -994,9 +1100,12 @@ def main() -> int:
         zp_dtype=FP8_E4M3_DATA.dtype,
     )
     scheme = QuantizationScheme(targets=["Linear"], weights=weights_args)
-    logger.info("Scheme: num_bits=%d, group_size=%d, strategy=%s",
-                scheme.weights.num_bits, scheme.weights.group_size,
-                scheme.weights.strategy)
+    logger.info(
+        "Scheme: num_bits=%d, group_size=%d, strategy=%s",
+        scheme.weights.num_bits,
+        scheme.weights.group_size,
+        scheme.weights.strategy,
+    )
 
     config = QuantizationConfig(
         quant_method="compressed-tensors",
@@ -1119,7 +1228,6 @@ def main() -> int:
         if weight is None or scale is None:
             continue
 
-        gscale = getattr(module, "weight_global_scale", None)
         state_dict: dict[str, torch.Tensor] = {
             "weight": weight.data.to("cuda:0"),
             "weight_scale": scale.data.to("cuda:0"),
@@ -1182,13 +1290,19 @@ def main() -> int:
                 if "weight_packed" in key:
                     packed_total += tensor.numel() * tensor.element_size()
 
-    logger.info("Output: %d params | packed: %.0f MB | scales: %.0f MB | other: %.0f MB",
-                len(output_state), packed_total / 1e6, scale_total / 1e6, other_total / 1e6)
+    logger.info(
+        "Output: %d params | packed: %.0f MB | scales: %.0f MB | other: %.0f MB",
+        len(output_state),
+        packed_total / 1e6,
+        scale_total / 1e6,
+        other_total / 1e6,
+    )
 
     # ── Save ────────────────────────────────────────────────
     output_dir = Path(args.output_dir)
     if output_dir.exists():
         import shutil
+
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
 
@@ -1208,9 +1322,7 @@ def main() -> int:
         json.dump(index, f)
 
     # Quantization manifest
-    total_bytes = sum(
-        f.stat().st_size for f in output_dir.rglob("*") if f.is_file()
-    )
+    total_bytes = sum(f.stat().st_size for f in output_dir.rglob("*") if f.is_file())
     manifest = {
         "model": "Zyphra/ZAYA1-8B",
         "quantization": {
@@ -1242,8 +1354,7 @@ def main() -> int:
         json.dump(manifest, f, indent=2)
 
     elapsed = time.time() - t0
-    logger.info("Saved in %.0fs | Total: %.0f MB (%.2f GB)",
-                elapsed, total_bytes / 1e6, total_bytes / 1e9)
+    logger.info("Saved in %.0fs | Total: %.0f MB (%.2f GB)", elapsed, total_bytes / 1e6, total_bytes / 1e9)
 
     # ── Verify ──────────────────────────────────────────────
     logger.info("")

@@ -41,7 +41,7 @@ def main() -> int:
     )
     print("Model loaded. Running inference...")
 
-    sampling_params = SamplingParams(temperature=0, max_tokens=3, logprobs=5)
+    sampling_params = SamplingParams(temperature=0, max_tokens=32, logprobs=5)
     prompt = "The capital of France is"
     outputs = llm.generate([prompt], sampling_params)
     out = outputs[0].outputs[0]

@@ -1,0 +1,136 @@
+From: Tremayne Timms <ttimmsinternational@gmail.com>
+Date: 2026-05-19
+Subject: [PATCH] zaya: W4A4 NVFP4 load + ignore-list prefixes for SM120
+
+Three changes to make Zyphra/ZAYA1-8B W4A4 NVFP4 checkpoints load and
+serve coherently through vllm's VLLM_CUTLASS MoE backend on consumer
+Blackwell (RTX 5070 Ti, SM120):
+
+  1. ZayaRouter: thread `prefix=` through to the four ReplicatedLinear
+     sub-modules (down_proj + 3 x router_mlp). Without it, vllm's
+     CompressedTensorsConfig.ignore regex `re:.*router.*` cannot match
+     the empty default prefix, so the router gets W4A4-quantized at
+     model construction even though the checkpoint stores it as plain
+     BF16 -> ~160 weights silently skipped at load.
+
+  2. load_weights: route per-Linear scalar `input_global_scale` and
+     `weight_global_scale` to FusedMoE's `w13_/w2_{input,weight}_
+     global_scale` params with w1/w3 replication for linear_fc1 and
+     single w2 load for linear_fc2. Old behavior fell through to the
+     w13_weight split branch, hitting IndexError on a 0-d scalar.
+
+  3. load_weights: split `linear_fc1.weight_scale` (shape [2*N, K/16])
+     into gate ([:N]) + up ([N:]) halves and load each as w1 + w3
+     separately. Loading once with shard_id="w1" only fills the gate
+     half of FusedMoE's w13_weight_scale; the up half remains at
+     torch.empty() uninitialized memory containing NaN bit patterns,
+     which propagate through CutlassExpertsFp4 and collapse all logits
+     to NaN -> argmax -> pad token. The weight_packed path already
+     split correctly; this aligns weight_scale with the same pattern.
+
+Apply with:
+    cd /path/to/vllm-src
+    patch -p1 < /path/to/zaya1-godspeed/patches/zaya_w4a4_vllm_src.patch
+
+---
+ vllm/model_executor/models/zaya.py | 64 ++++++++++++++++++++++++++++--
+ 1 file changed, 60 insertions(+), 4 deletions(-)
+
+--- a/vllm/model_executor/models/zaya.py
++++ b/vllm/model_executor/models/zaya.py
+@@ -331,6 +331,7 @@
+             bias=True,
+             quant_config=quant_config,
+             return_bias=False,
++            prefix=f"{prefix}.down_proj",
+         )
+ 
+         # EDA (depth-wise averaging)
+@@ -354,15 +355,18 @@
+         self.non_linearity = nn.GELU()
+         self.router_mlp = nn.Sequential(
+             ReplicatedLinear(
+-                D, D, bias=True, quant_config=quant_config, return_bias=False
++                D, D, bias=True, quant_config=quant_config, return_bias=False,
++                prefix=f"{prefix}.router_mlp.0",
+             ),
+             self.non_linearity,
+             ReplicatedLinear(
+-                D, D, bias=True, quant_config=quant_config, return_bias=False
++                D, D, bias=True, quant_config=quant_config, return_bias=False,
++                prefix=f"{prefix}.router_mlp.2",
+             ),
+             self.non_linearity,
+             ReplicatedLinear(
+-                D, E, bias=False, quant_config=quant_config, return_bias=False
++                D, E, bias=False, quant_config=quant_config, return_bias=False,
++                prefix=f"{prefix}.router_mlp.4",
+             ),
+         )
+ 
+@@ -955,7 +959,30 @@
+                     continue
+ 
+                 if parts[-2] == "linear_fc1":
+-                    # Route weight_scale keys to scale param
++                    suffix = parts[-1]
++                    # NVFP4 W4A4: per-Linear scalar global scales need to be
++                    # replicated across w1 and w3 slots (FusedMoE stores them
++                    # as [num_experts, 2]). Handle BEFORE the "weight_scale"
++                    # substring check, since `weight_global_scale` matches it.
++                    if suffix in ("input_global_scale", "weight_global_scale"):
++                        gs_param_name = f"{fused_moe_prefix}.w13_{suffix}"
++                        gs_param = params_dict[gs_param_name]
++                        fused_moe_module.weight_loader(
++                            gs_param, loaded_weight, chkpt_weight_name, "w1", expert_id
++                        )
++                        fused_moe_module.weight_loader(
++                            gs_param, loaded_weight, chkpt_weight_name, "w3", expert_id
++                        )
++                        loaded_params.add(gs_param_name)
++                        continue
++                    # Route weight_scale keys to scale param. The fused
++                    # gate+up Linear stores one weight_scale of shape
++                    # [2*N, K/16]; FusedMoE expects two halves loaded as w1
++                    # and w3 separately. Loading once with shard_id="w1"
++                    # leaves the up half of the registered param
++                    # (FusedMoE-allocated via torch.empty) UNINITIALIZED,
++                    # producing NaN in ~half of the per-group scales and
++                    # collapsing all downstream logits.
+                     if "weight_scale" in chkpt_weight_name:
+                         scale_param_name = f"{fused_moe_prefix}.w13_weight_scale"
+                         if scale_param_name not in params_dict:
+@@ -963,8 +990,14 @@
+                             if scale_param_name_packed in params_dict:
+                                 scale_param_name = scale_param_name_packed
+                         scale_param = params_dict[scale_param_name]
++                        half = loaded_weight.shape[0] // 2
++                        gate_scale = loaded_weight[:half, :]
++                        up_scale = loaded_weight[half:, :]
+                         fused_moe_module.weight_loader(
+-                            scale_param, loaded_weight, chkpt_weight_name, "w1", expert_id
++                            scale_param, gate_scale, chkpt_weight_name, "w1", expert_id
++                        )
++                        fused_moe_module.weight_loader(
++                            scale_param, up_scale, chkpt_weight_name, "w3", expert_id
+                         )
+                         continue
+                     param_name = f"{fused_moe_prefix}.w13_weight"
+@@ -984,6 +1017,17 @@
+                     )
+                     loaded_params.add(param_name)
+                 elif parts[-2] == "linear_fc2":
++                    suffix = parts[-1]
++                    # NVFP4 W4A4: per-Linear scalar global scales. FusedMoE
++                    # stores w2 globals as [num_experts] (no w1/w3 split).
++                    if suffix in ("input_global_scale", "weight_global_scale"):
++                        gs_param_name = f"{fused_moe_prefix}.w2_{suffix}"
++                        gs_param = params_dict[gs_param_name]
++                        fused_moe_module.weight_loader(
++                            gs_param, loaded_weight, chkpt_weight_name, "w2", expert_id
++                        )
++                        loaded_params.add(gs_param_name)
++                        continue
+                     # Route weight_scale keys to scale param
+                     if "weight_scale" in chkpt_weight_name:
+                         scale_param_name = f"{fused_moe_prefix}.w2_weight_scale"

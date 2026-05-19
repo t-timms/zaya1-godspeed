@@ -37,7 +37,7 @@ def main() -> int:
         gpu_memory_utilization=0.85,
         enforce_eager=True,
         max_num_seqs=1,
-        moe_backend="emulation",  # BF16 dequant + plain GEMM — isolates kernel vs loading
+        moe_backend="cutlass",  # VLLM_CUTLASS (compiled SM120 kernels)
     )
     print("Model loaded. Running inference...")
 

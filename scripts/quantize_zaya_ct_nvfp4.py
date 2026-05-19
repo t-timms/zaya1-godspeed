@@ -80,7 +80,8 @@ W4A4_IGNORE_PATTERNS = [
     "lm_head",  # tied to embed_tokens, BF16
     "re:.*router.*",  # MoE router (size_n=17, doesn't fit FP4 grid cleanly)
     "re:.*norm.*",  # RMSNorm
-    "re:.*qkv.*",  # CCA Q/K/V projections (4 Linears × 40 ATT layers = 160)
+    "re:.*qkv.*",  # named_modules path: model.layers.X.self_attn.qkv.linear_q
+    "re:.*cca.*",  # construct-time prefix path: model.layers.X.self_attn.cca.linear_q
 ]
 
 

@@ -41,7 +41,7 @@ def main() -> int:
     )
     print("Model loaded. Running inference...")
 
-    sampling_params = SamplingParams(temperature=0, max_tokens=24)
+    sampling_params = SamplingParams(temperature=0, max_tokens=3, logprobs=5)
     prompt = "The capital of France is"
     outputs = llm.generate([prompt], sampling_params)
     out = outputs[0].outputs[0]
@@ -49,6 +49,15 @@ def main() -> int:
     print(f"Output text:      {out.text!r}")
     print(f"Output token_ids: {list(out.token_ids)}")
     print(f"Finish reason:    {out.finish_reason}")
+    print("--- top-5 logprobs at each step ---")
+    if out.logprobs is not None:
+        for i, step in enumerate(out.logprobs):
+            entries = sorted(step.items(), key=lambda kv: -kv[1].logprob)[:5]
+            print(f"step {i}:")
+            for tok_id, lp in entries:
+                print(f"  tok={tok_id:>6}  logprob={lp.logprob:>10.4f}  decoded={lp.decoded_token!r}")
+    else:
+        print("(no logprobs available)")
     if "Paris" in out.text:
         print("SMOKE TEST PASSED — coherent output, CUTLASS path live")
         return 0

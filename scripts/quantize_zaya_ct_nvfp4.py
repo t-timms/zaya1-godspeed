@@ -13,7 +13,7 @@ Two schemes supported via --scheme:
     norm, cca, mamba, conv1d — those layers stay BF16. Activation calibration
     runs the BF16 model forward over calibration_data.pt via device_map="auto"
     offload, observing max |activation| per quantized Linear via pre-forward
-    hooks, then sets input_global_scale = max / FP4_E2M1_max (6.0).
+    hooks, then sets input_global_scale = 2688 / max_act.
     Output: ./zaya1-8b-nvfp4-w4a4/ (~5.5 GB + per-Linear fp32 scales).
     Run time: ~1-4 GPU-hours (offload-bound). Requires data/calibration/
     calibration_data.pt from build_calibration_data.py. Compatible with vLLM's
@@ -55,6 +55,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import torch
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -68,7 +70,11 @@ DEFAULT_OUTPUT_W4A4 = "./zaya1-8b-nvfp4-w4a4"
 DEFAULT_CALIBRATION_DATA = "data/calibration/calibration_data.pt"
 DRY_RUN_LAYERS = 2
 DRY_RUN_LAYERS_W4A4 = 4  # need a few more for hook coverage to make sense
-FP4_E2M1_MAX = 6.0  # max magnitude representable in FP4 E2M1 — divisor for scales
+FP4_E2M1_MAX = 6.0  # max magnitude representable in FP4 E2M1
+FP8_E4M3_MAX = 448.0  # max magnitude representable in FP8 E4M3
+# CT convention: global_scale = FP8_MAX * FP4_MAX / max_abs = 2688 / max_abs
+# (see compressed_tensors.quantization.utils.helpers._compute_global_scale)
+GLOBAL_SCALE_NUM = FP8_E4M3_MAX * FP4_E2M1_MAX  # 2688.0
 
 # W4A4 layers that MUST stay BF16 (regex patterns for compressed_tensors
 # ignore list). compressed_tensors matches against module *paths* from
@@ -83,6 +89,14 @@ W4A4_IGNORE_PATTERNS = [
     "re:.*qkv.*",  # named_modules path: model.layers.X.self_attn.qkv.linear_q
     "re:.*cca.*",  # construct-time prefix path: model.layers.X.self_attn.cca.linear_q
 ]
+
+# Default threshold for dynamic mixed-precision exemption. MoE layers where any
+# expert activation max_abs exceeds this value are kept at BF16 rather than W4A4.
+# Derived from outlier analysis: 24 linear_fc2 modules have max_abs > 500, with
+# the top offender at 8896 (L75.experts.1) causing 3.31× effective FP8 saturation.
+# FusedMoE requires uniform quantization across all experts in a layer, so we
+# exempt the entire layer's MLP when any single expert is an outlier.
+MIXED_PRECISION_DEFAULT_THRESHOLD = 500.0
 
 
 def _is_quantized_linear(module: Any) -> bool:
@@ -215,10 +229,10 @@ def calibrate_input_global_scales(
         if max_act <= 0:
             missing.append(name)
             continue
-        scale = max_act / FP4_E2M1_MAX
-        # Store as fp32 buffer; the loader in CutlassNvFp4LinearKernel reads
-        # this as input_global_scale_inv = 1 / input_global_scale during
-        # process_weights_after_loading.
+        # CT convention: input_global_scale = 2688 / max_act (the DIVISOR form).
+        # The loader passes this directly to the kernel as the divisor,
+        # computing per-block scale = input_global_scale * block_max / 6.0.
+        scale = GLOBAL_SCALE_NUM / max_act
         import torch
 
         mod.input_global_scale = torch.nn.Parameter(torch.tensor(scale, dtype=torch.float32), requires_grad=False)
@@ -234,6 +248,91 @@ def calibrate_input_global_scales(
         logger.warning("Missing observations on %d modules — first few: %s", len(missing), missing[:5])
 
     return activation_max
+
+
+# ── MSE-optimized calibration helpers ──────────────────────────────
+# NVFP4 representable values (symmetric, positive half)
+_NVFP4_LEVELS = torch.tensor(
+    [0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+    dtype=torch.float32,
+)
+
+
+def _fake_quant_nvfp4(x: torch.Tensor, input_global_scale: float) -> torch.Tensor:
+    """Fake-quantize activations to NVFP4 with a given input_global_scale.
+
+    Used offline in ``_optimize_input_global_scales`` to evaluate candidate
+    scales without running the model forward again.
+    """
+    orig_shape = x.shape
+    gs = 16
+    x_2d = x.reshape(-1, orig_shape[-1])  # [N, D]
+    # Reshape to groups of 16
+    x_g = x_2d.reshape(-1, gs)  # [N * n_g, 16]
+    # Per-group max
+    g_max = torch.clamp(x_g.abs().amax(dim=-1, keepdim=True), min=1e-12)
+    # Block scale (same per-group): [N * n_g, 1]
+    bs = torch.clamp(
+        input_global_scale * g_max / FP4_E2M1_MAX,
+        max=FP8_E4M3_MAX,
+    )
+    # Normalize
+    x_n = x_g / bs
+    x_c = torch.clamp(x_n, -FP4_E2M1_MAX, FP4_E2M1_MAX).float()
+    # Round to nearest NVFP4 level (non-uniform)
+    fp4 = _NVFP4_LEVELS.to(x.device)
+    x_abs = x_c.abs()
+    dist = (x_abs.unsqueeze(-1) - fp4.unsqueeze(0)).abs()
+    best = dist.argmin(dim=-1)
+    x_q = fp4[best] * x_c.sign()
+    return (x_q * bs).reshape(orig_shape)
+
+
+def _optimize_input_global_scales(
+    activation_cache: dict[str, torch.Tensor],
+    activation_max: dict[str, float],
+) -> dict[str, float]:
+    """Search optimal input_global_scale per Linear by minimizing MSE.
+
+    Generates candidate scales from percentiles and multipliers, picks the one
+    with lowest fake-quant MSE on the cached calibration activations.
+    """
+    optimized: dict[str, float] = {}
+    fp4 = _NVFP4_LEVELS
+
+    for name, max_act in activation_max.items():
+        if max_act <= 0:
+            continue
+        cached = activation_cache.get(name)
+        if cached is None or cached.numel() == 0:
+            optimized[name] = GLOBAL_SCALE_NUM / max_act
+            continue
+
+        cached = cached.float()
+        base_scale = GLOBAL_SCALE_NUM / max_act
+
+        # Build candidate list
+        candidates: list[float] = [base_scale]
+        vals_flat = cached.abs().flatten()
+        if vals_flat.numel() > 0:
+            for p in [90, 95, 99]:
+                pv = float(torch.quantile(vals_flat, p / 100.0).item())
+                if pv > 0:
+                    candidates.append(GLOBAL_SCALE_NUM / pv)
+        for mult in [0.5, 0.75, 1.25, 1.5]:
+            candidates.append(base_scale * mult)
+
+        best_scale = base_scale
+        best_mse = float("inf")
+        for c in set(candidates):  # deduplicate
+            dq = _fake_quant_nvfp4(cached, c)
+            mse = float(torch.mean((cached - dq) ** 2).item())
+            if mse < best_mse:
+                best_mse = mse
+                best_scale = c
+        optimized[name] = best_scale
+
+    return optimized
 
 
 def calibrate_input_global_scales_layerwise(
@@ -282,6 +381,24 @@ def calibrate_input_global_scales_layerwise(
     dev = torch.device(device)
 
     activation_max: dict[str, float] = {}
+    activation_cache: dict[str, torch.Tensor] = {}  # for MSE optimization
+    sample_counts: dict[str, int] = {}
+    CACHE_SIZE = 128  # reservoir-sampled vectors per Linear
+
+    def _cache_sample(name: str, vec: torch.Tensor) -> None:
+        """Reservoir sampling: keep up to CACHE_SIZE random vectors per key."""
+        sample_counts[name] = sample_counts.get(name, 0) + 1
+        n = sample_counts[name]
+        if n <= CACHE_SIZE:
+            if name not in activation_cache:
+                activation_cache[name] = vec
+            else:
+                activation_cache[name] = torch.cat([activation_cache[name], vec], dim=0)
+        else:
+            # Replace random existing element with prob CACHE_SIZE / n
+            if torch.rand(1).item() < CACHE_SIZE / n:
+                idx = torch.randint(0, CACHE_SIZE, (1,)).item()
+                activation_cache[name][idx : idx + 1] = vec
 
     def _make_pre_hook(mod_name: str) -> Callable:
         def _pre_hook(_mod: Any, args: tuple[Any, ...]) -> None:
@@ -295,10 +412,22 @@ def calibrate_input_global_scales_layerwise(
             if x.numel() == 0:
                 return
             with torch.no_grad():
-                cur_max = float(x.detach().float().abs().max().item())
+                xf = x.detach().float()
+                cur_max = float(xf.abs().max().item())
             prev = activation_max.get(mod_name, 0.0)
             if cur_max > prev:
                 activation_max[mod_name] = cur_max
+
+            # Cache a few activation vectors per Linear for MSE analysis
+            x2d = xf.reshape(-1, xf.shape[-1])
+            nt = x2d.shape[0]
+            sample_positions = [0]
+            if nt > 2:
+                sample_positions.append(nt - 1)
+            if nt > 8:
+                sample_positions.append(nt // 4)
+            for pos in sample_positions:
+                _cache_sample(mod_name, x2d[pos : pos + 1].cpu())
 
         return _pre_hook
 
@@ -438,6 +567,17 @@ def calibrate_input_global_scales_layerwise(
 
     logger.info("Layer-wise forward complete in %.0fs", time.time() - t_start)
 
+    # ── MSE-optimize input_global_scale ────────────────────────
+    # NOTE: Disabled because MSE optimization was found to HURT accuracy.
+    # On ARC-Easy, 25.5% total MSE reduction (154/1320 Linears improved) led to
+    # 62.6% acc vs 68.6% with max-abs calibration. Outlier activations carry
+    # discriminative signal that clipping (even at 1%) destroys.
+    # Max-abs (global_scale = FP8_MAX * FP4_MAX / max_abs) is the correct choice
+    # for activation quantization — preserves all outlier information at the cost
+    # of slightly noisier inlier quantization.
+    logger.info("MSE optimization disabled — using max-abs calibration (proven more accurate)")
+    optimized_scales: dict[str, float] = {}
+
     # ── Set input_global_scale per quantized Linear ────────────
     # Only set on modules WITHIN the processed layer range so dry-run output
     # matches dry-run expectations.
@@ -459,7 +599,9 @@ def calibrate_input_global_scales_layerwise(
         if max_act <= 0:
             missing.append(name)
             continue
-        scale = max_act / FP4_E2M1_MAX
+        base_scale = GLOBAL_SCALE_NUM / max_act
+        # Use MSE-optimized scale if available, else fall back to max-abs
+        scale = optimized_scales.get(name, base_scale)
         mod.input_global_scale = _torch.nn.Parameter(_torch.tensor(scale, dtype=_torch.float32), requires_grad=False)
         set_count += 1
 
@@ -473,6 +615,39 @@ def calibrate_input_global_scales_layerwise(
         logger.warning("Missing observations on %d modules — first few: %s", len(missing), missing[:5])
 
     return activation_max
+
+
+def _apply_weight_global_scale_convention(
+    compressed_params: dict[str, dict[str, torch.Tensor]],
+) -> int:
+    """Transform weight_scale/weight_global_scale to CT convention.
+
+    CT's NVFP4 contract requires:
+        weight_global_scale = 2688 / max_abs(W)    [float32 scalar]
+        weight_scale       = s_true * weight_global_scale  [per-group, fp8]
+
+    The quantize pipeline stores raw s_true = w_max_group / 6 in weight_scale
+    and never sets weight_global_scale. This function patches both to satisfy
+    the convention, so the vLLM CUTLASS loader reads them correctly.
+
+    Returns the number of modules patched.
+    """
+    patched = 0
+    for comp in compressed_params.values():
+        ws = comp.get("weight_scale")
+        if ws is None:
+            continue
+        ws_f32 = ws.float()
+        max_abs_w = FP4_E2M1_MAX * ws_f32.abs().max().item()
+        if max_abs_w <= 0:
+            continue
+        wgs = GLOBAL_SCALE_NUM / max_abs_w
+        comp["weight_global_scale"] = torch.tensor([wgs], dtype=torch.float32)
+        # Rewrite weight_scale = s_true * wgs (clamped to FP8 range)
+        new_ws = (ws_f32 * wgs).clamp(max=FP8_E4M3_MAX, min=-FP8_E4M3_MAX)
+        comp["weight_scale"] = new_ws.to(torch.float8_e4m3fn)
+        patched += 1
+    return patched
 
 
 def _extract_layer_idx(module_name: str) -> int | None:
@@ -653,6 +828,58 @@ def run_w4a4(args: Any) -> int:
             vals[-1],
         )
 
+    # ── Dynamic mixed-precision exemption ────────────────────
+    # FusedMoE requires uniform quantization across ALL experts in a layer, so
+    # when any single expert's activation exceeds the threshold we exempt the
+    # ENTIRE layer's MLP. BF16 modules will be saved as raw weights in the
+    # checkpoint and added to the quantization_config ignore list so vLLM routes
+    # them through the standard BF16 matmul path.
+    dynamic_bf16_set: set[str] = set()   # module names exempted from W4A4
+    dynamic_outlier_layers: set[int] = set()  # layer indices driving the exemption
+    threshold = getattr(args, "mixed_precision_threshold", MIXED_PRECISION_DEFAULT_THRESHOLD)
+    if threshold is not None and threshold > 0:
+        for name, max_act in activation_max.items():
+            if max_act > threshold:
+                layer_idx = _extract_layer_idx(name)
+                if layer_idx is not None:
+                    dynamic_outlier_layers.add(layer_idx)
+
+        if dynamic_outlier_layers:
+            for name, mod in model.named_modules():
+                if not _is_quantized_linear(mod):
+                    continue
+                layer_idx = _extract_layer_idx(name)
+                if layer_idx in dynamic_outlier_layers:
+                    dynamic_bf16_set.add(name)
+
+            logger.info(
+                "Mixed precision: %d outlier layers → %d modules exempted to BF16 "
+                "(max_abs > %.1f)",
+                len(dynamic_outlier_layers),
+                len(dynamic_bf16_set),
+                threshold,
+            )
+            logger.info("  Outlier layers: %s", sorted(dynamic_outlier_layers))
+            # Log the worst offender per outlier layer
+            for layer_idx in sorted(dynamic_outlier_layers):
+                worst_name = max(
+                    (n for n in activation_max if _extract_layer_idx(n) == layer_idx),
+                    key=lambda n: activation_max[n],
+                    default=None,
+                )
+                if worst_name:
+                    logger.info(
+                        "  L%d worst expert: max_abs=%.1f (%s)",
+                        layer_idx,
+                        activation_max[worst_name],
+                        worst_name.split(".")[-1],
+                    )
+        else:
+            logger.info(
+                "Mixed precision: no layers exceeded threshold %.1f — all W4A4",
+                threshold,
+            )
+
     # ── Compute weight scales (same logic as W4A16) ─────────
     logger.info("Computing per-group weight scales...")
     calibrated_w = 0
@@ -702,11 +929,17 @@ def run_w4a4(args: Any) -> int:
     logger.info("Compressing weights with NVFP4PackedCompressor...")
     t0 = time.time()
 
+    bf16_exempted_count = 0
     for name, module in model.named_modules():
         qscheme = getattr(module, "quantization_scheme", None)
         if qscheme is None or qscheme.weights is None:
             continue
         if args.dry_run and name in skipped_layers:
+            continue
+
+        # Mixed-precision exemption: entire outlier layers stay BF16.
+        if name in dynamic_bf16_set:
+            bf16_exempted_count += 1
             continue
 
         weight = getattr(module, "weight", None)
@@ -729,7 +962,17 @@ def run_w4a4(args: Any) -> int:
         if igs is not None:
             compressed_params[name]["input_global_scale"] = igs.data.to(torch.float32).cpu()
 
-    logger.info("Compressed %d Linear modules in %.0fs (skipped %d)", linear_count, time.time() - t0, skipped)
+    logger.info(
+        "Compressed %d Linear modules in %.0fs (skipped %d, BF16-exempted %d)",
+        linear_count,
+        time.time() - t0,
+        skipped,
+        bf16_exempted_count,
+    )
+
+    # ── Apply CT weight_global_scale convention ─────────────
+    wgs_patched = _apply_weight_global_scale_convention(compressed_params)
+    logger.info("Applied weight_global_scale convention on %d modules", wgs_patched)
 
     # ── Build output state dict ─────────────────────────────
     # Same shape as W4A16 path, but with input_global_scale per Linear.
@@ -745,6 +988,16 @@ def run_w4a4(args: Any) -> int:
     dropped_dryrun = 0
     dryrun_cutoff = DRY_RUN_LAYERS_W4A4 if args.dry_run else None
 
+    # Quant-specific param suffixes that must NOT appear in the checkpoint for
+    # BF16-exempted layers. The original Zyphra NVFP4 model stores these on
+    # every Linear; we strip them so BF16 layers only carry their .weight tensor.
+    # This makes the checkpoint unambiguous and eliminates the need for any
+    # defensive guards in vLLM's load_weights path.
+    _BF16_QUANT_SUFFIXES: frozenset[str] = frozenset({
+        "weight_scale", "weight_global_scale", "weight_zero_point",
+        "input_global_scale", "weight_packed",
+    })
+
     for pname, param in model.named_parameters():
         module_name = ".".join(pname.split(".")[:-1])
         param_short = pname.split(".")[-1]
@@ -754,6 +1007,11 @@ def run_w4a4(args: Any) -> int:
             if li is not None and li >= dryrun_cutoff:
                 dropped_dryrun += 1
                 continue
+
+        # BF16-exempted modules: drop all quant-specific tensors from the
+        # original Zyphra NVFP4 format. Only the BF16 .weight survives.
+        if module_name in dynamic_bf16_set and param_short in _BF16_QUANT_SUFFIXES:
+            continue
 
         if module_name in compressed_params:
             if param_short == "weight":
@@ -796,6 +1054,11 @@ def run_w4a4(args: Any) -> int:
                 elif "input_global_scale" in key:
                     igs_total += tensor.numel() * tensor.element_size()
 
+    if dynamic_bf16_set:
+        logger.info(
+            "Scrubbed quant tensors from %d BF16-exempted Linear modules — checkpoint contains only .weight for those layers",
+            len(dynamic_bf16_set),
+        )
     logger.info(
         "Output: %d params | packed: %.0f MB | weight_scales: %.0f MB | input_global_scale: %.1f KB | other: %.0f MB",
         len(output_state),
@@ -828,6 +1091,17 @@ def run_w4a4(args: Any) -> int:
     config_path = output_dir / "config.json"
     with open(config_path) as cf:
         config_dict = json.load(cf)
+    # Build the effective ignore list: static patterns + dynamic per-layer
+    # patterns for outlier MoE layers. vLLM reads this to determine which
+    # modules use BF16 vs NVFP4 at inference time.
+    effective_ignore: list[str] = list(W4A4_IGNORE_PATTERNS)
+    if dynamic_outlier_layers:
+        layer_nums = "|".join(str(i) for i in sorted(dynamic_outlier_layers))
+        # Match all submodules within the outlier layers' MLP block
+        dynamic_ignore_pattern = f"re:model\\.layers\\.({layer_nums})\\..+"
+        effective_ignore.append(dynamic_ignore_pattern)
+        logger.info("Dynamic ignore pattern added: %s", dynamic_ignore_pattern)
+
     config_dict["quantization_config"] = {
         "quant_method": "compressed-tensors",
         "format": "nvfp4-pack-quantized",
@@ -852,7 +1126,7 @@ def run_w4a4(args: Any) -> int:
                 "targets": ["Linear"],
             }
         },
-        "ignore": list(W4A4_IGNORE_PATTERNS),
+        "ignore": effective_ignore,
     }
     with open(config_path, "w") as cf:
         json.dump(config_dict, cf, indent=2)
@@ -895,6 +1169,17 @@ def run_w4a4(args: Any) -> int:
             "linears_calibrated": sum(
                 1 for n, _ in [(k, v) for k, v in compressed_params.items() if "input_global_scale" in v]
             ),
+        },
+        "mixed_precision": {
+            "threshold": threshold,
+            "outlier_layers": sorted(dynamic_outlier_layers),
+            "bf16_exempted_modules": len(dynamic_bf16_set),
+            "w4a4_compressed_modules": linear_count,
+            "description": (
+                f"{len(dynamic_outlier_layers)} MoE layers where max_abs > {threshold:.0f} "
+                f"kept at BF16 ({len(dynamic_bf16_set)} Linears). "
+                f"FusedMoE requires uniform quantization per layer."
+            ) if dynamic_outlier_layers else "disabled",
         },
         "hardware": {
             "gpu": torch.cuda.get_device_name(0),
@@ -975,6 +1260,13 @@ def run_w4a4(args: Any) -> int:
     else:
         logger.info("W4A4 COMPLETE — NVFP4 W4A4 ZAYA1-8B")
         logger.info("Output: %s (%.1f GB)", output_dir, total_bytes / 1e9)
+        if dynamic_outlier_layers:
+            logger.info(
+                "Mixed precision: %d outlier layers (%s) kept at BF16 MLP",
+                len(dynamic_outlier_layers),
+                sorted(dynamic_outlier_layers),
+            )
+            logger.info("  W4A4 modules: %d | BF16 modules: %d", linear_count, bf16_exempted_count)
         logger.info("Next: smoke test with VLLM_NVFP4_GEMM_BACKEND=cutlass to force SM120 CUTLASS")
     logger.info("=" * 60)
     return 0
@@ -1015,6 +1307,20 @@ def main() -> int:
         type=int,
         default=1,
         help="Batch size for calibration forward. Default 1 — 8B BF16 + 1024-token activations near saturate 16 GB.",
+    )
+    parser.add_argument(
+        "--mixed-precision-threshold",
+        type=float,
+        default=MIXED_PRECISION_DEFAULT_THRESHOLD,
+        metavar="MAX_ABS",
+        dest="mixed_precision_threshold",
+        help=(
+            "W4A4 layers where any expert activation max_abs exceeds this value are kept "
+            f"at BF16 instead of compressed (default: {MIXED_PRECISION_DEFAULT_THRESHOLD}). "
+            "FusedMoE requires uniform quantization per layer, so the entire layer's MLP "
+            "is exempted when any single expert is an outlier. "
+            "Set to 0 to disable mixed precision. Only applies to --scheme w4a4."
+        ),
     )
     args = parser.parse_args()
 
@@ -1199,6 +1505,10 @@ def main() -> int:
 
     elapsed = time.time() - t0
     logger.info("Compressed %d Linear modules in %.0fs (skipped %d)", linear_count, elapsed, skipped)
+
+    # ── Apply CT weight_global_scale convention ─────────────
+    wgs_patched = _apply_weight_global_scale_convention(compressed_params)
+    logger.info("Applied weight_global_scale convention on %d modules", wgs_patched)
 
     # ── Quantize embedding layer ────────────────────────────
     # ZAYA uses tie_word_embeddings=True → embed_tokens = lm_head (same weight).

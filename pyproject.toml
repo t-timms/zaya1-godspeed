@@ -1,6 +1,6 @@
 [project]
 name = "zaya1-godspeed"
-version = "0.2.0"
+version = "0.3.0"
 description = "Completing ZAYA1-8B with agentic multi-turn tool calling via teacher-distilled SFT+GRPO. DeepSeek V4 Pro teacher, Godspeed harness, Unsloth + TRL."
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}

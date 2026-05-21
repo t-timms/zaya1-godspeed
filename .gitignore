@@ -56,6 +56,9 @@ zaya1-8b-nvfp4-w4a4/
 zaya1-8b-nvfp4-w4a4-soar/
 zaya1-8b-nvfp4-w4a4-mrgptq-v2/
 
+# Session handoff (local only)
+SESSION_HANDOFF.md
+
 # Benchmark results (large JSONs)
 results/*.json
 

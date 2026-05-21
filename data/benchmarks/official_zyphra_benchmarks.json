@@ -1,0 +1,40 @@
+{
+  "source": "Zyphra official benchmarks — https://huggingface.co/Zyphra/ZAYA1-8B",
+  "retrieved": "2026-05-19",
+  "in_class_comparison": {
+    "description": "In-class comparison against open-source reasoning models (similar active-parameter budget)",
+    "models": {
+      "ZAYA1-8B":                  {"active_B": 0.7, "total_B": 8.0,  "notes": "MoE, top-1 routing"},
+      "Qwen3-4B-Thinking-2507":    {"active_B": 4.0, "total_B": 4.0},
+      "Qwen3.5-4B":                {"active_B": 4.0, "total_B": 4.0},
+      "Gemma-4-E4B-it":            {"active_B": 4.0, "total_B": 8.0,  "notes": "MoE"}
+    },
+    "benchmarks": {
+      "AIME_2026":         {"category": "Math",           "ZAYA1-8B": 89.1, "Qwen3-4B-Thinking-2507": 77.5, "Qwen3.5-4B": 84.5, "Gemma-4-E4B-it": 50.3},
+      "HMMT_Feb_2026":     {"category": "Math",           "ZAYA1-8B": 71.6, "Qwen3-4B-Thinking-2507": 60.8, "Qwen3.5-4B": 63.6, "Gemma-4-E4B-it": 32.1},
+      "IMO_AnswerBench":   {"category": "Math",           "ZAYA1-8B": 59.3, "Qwen3-4B-Thinking-2507": 50.9, "Qwen3.5-4B": 48.7, "Gemma-4-E4B-it": 27.3},
+      "APEX_shortlist":    {"category": "Math",           "ZAYA1-8B": 32.2, "Qwen3-4B-Thinking-2507": 16.9, "Qwen3.5-4B": null, "Gemma-4-E4B-it": 6.1},
+      "LiveCodeBench_v6":  {"category": "Code",           "ZAYA1-8B": 65.8, "Qwen3-4B-Thinking-2507": 54.2, "Qwen3.5-4B": null, "Gemma-4-E4B-it": 54.2},
+      "GPQA_Diamond":      {"category": "Knowledge",      "ZAYA1-8B": 71.0, "Qwen3-4B-Thinking-2507": 66.5, "Qwen3.5-4B": 76.2, "Gemma-4-E4B-it": 57.4},
+      "MMLU_Pro":          {"category": "Knowledge",      "ZAYA1-8B": 74.2, "Qwen3-4B-Thinking-2507": 74.3, "Qwen3.5-4B": 79.1, "Gemma-4-E4B-it": 70.2},
+      "IFEval":            {"category": "Instruction",    "ZAYA1-8B": 85.58,"Qwen3-4B-Thinking-2507": 86.8, "Qwen3.5-4B": 89.8, "Gemma-4-E4B-it": 88.50},
+      "IFBench":           {"category": "Instruction",    "ZAYA1-8B": 52.56,"Qwen3-4B-Thinking-2507": 52.9, "Qwen3.5-4B": 59.2, "Gemma-4-E4B-it": 42.67},
+      "EQBench":           {"category": "Style & chat",   "ZAYA1-8B": 72.95,"Qwen3-4B-Thinking-2507": 79.6, "Qwen3.5-4B": 79.5, "Gemma-4-E4B-it": 80.15},
+      "Creative_Writing_v3":{"category": "Style & chat",  "ZAYA1-8B": 62.97,"Qwen3-4B-Thinking-2507": 58.6, "Qwen3.5-4B": 72.9, "Gemma-4-E4B-it": 83.75},
+      "BFCL_v4":           {"category": "Agentic",        "ZAYA1-8B": 39.22,"Qwen3-4B-Thinking-2507": 49.7, "Qwen3.5-4B": 45.2, "Gemma-4-E4B-it": 31.7},
+      "tau_squared":       {"category": "Agentic",        "ZAYA1-8B": 43.12,"Qwen3-4B-Thinking-2507": 52.9, "Qwen3.5-4B": 82.1, "Gemma-4-E4B-it": 37.7}
+    }
+  },
+  "scaling_comparison": {
+    "description": "Comparison against larger open-source reasoning models",
+    "models": [
+      {"name": "ZAYA1-8B",               "active_B": 0.7,  "total_B": 8,   "AIME_2026": 89.1, "HMMT_2026": 71.6, "LCB_v6": 63.8, "IFEval": 85.8,  "GPQA_D": 71.0, "MMLU_Pro": 74.2},
+      {"name": "Arcee-Trinity-Mini",      "active_B": 3.0,  "total_B": 26,  "AIME_2026": 59.6, "HMMT_2026": 36.9, "LCB_v6": 33.3, "IFEval": 62.0,  "GPQA_D": 46.8, "MMLU_Pro": 70.6},
+      {"name": "N3-Nano-30B",             "active_B": 3.0,  "total_B": 30,  "AIME_2026": 90.1, "HMMT_2026": 75.5, "LCB_v6": 64.6, "IFEval": 92.8,  "GPQA_D": 75.1, "MMLU_Pro": 78.9},
+      {"name": "OLMo-3.1-32B-Think",     "active_B": 32.0, "total_B": 32,  "AIME_2026": 78.9, "HMMT_2026": 50.6, "LCB_v6": 58.3, "IFEval": 93.2,  "GPQA_D": 59.6, "MMLU_Pro": 75.8},
+      {"name": "Qwen3-Next-80B-A3B-Think","active_B": 3.0,  "total_B": 80,  "AIME_2026": 90.2, "HMMT_2026": 79.3, "LCB_v6": 67.8, "IFEval": 88.5,  "GPQA_D": 76.7, "MMLU_Pro": 82.6},
+      {"name": "Intellect-3",            "active_B": 12.0, "total_B": 106, "AIME_2026": 86.3, "HMMT_2026": 72.2, "LCB_v6": 66.8, "IFEval": 81.2,  "GPQA_D": 74.6, "MMLU_Pro": 82.3},
+      {"name": "Mistral-Small-4-119B",   "active_B": 6.0,  "total_B": 119, "AIME_2026": 86.4, "HMMT_2026": 70.6, "LCB_v6": 57.9, "IFEval": 84.0,  "GPQA_D": 77.2, "MMLU_Pro": 81.6}
+    ]
+  }
+}

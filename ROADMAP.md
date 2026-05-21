@@ -241,6 +241,53 @@ addressed at Week 3 if accuracy testing reveals it as a hot spot
 | Full W4A4 quantization on all 80 layers | ✅ | 1320/1320 IGS at 100% coverage |
 | Integrate W4A4 with CUTLASS SM120 kernel | ⬜ | Week 2 — wire loader to `CutlassNvFp4LinearKernel`, force VLLM_NVFP4_GEMM_BACKEND=cutlass |
 
+#### Accuracy Baselines — Session 8 (2026-05-19) 🟢
+
+First lm-eval numbers on the W4A4 checkpoint. All 1320 Linears at W4A4; 12 outlier
+MoE layers with max-abs > 500 exempted to BF16 MLP (`--mixed-precision-threshold 500`).
+
+| Benchmark | W4A4 (SOAR) | BF16 ceiling | Gap |
+|-----------|------------|--------------|-----|
+| ARC-Easy acc | 68.6% | ~75-80% | ~7-12pp |
+| ARC-Easy acc_norm | 67.3% | — | — |
+| HellaSwag acc | 45.7% | ~76-80% | — |
+| HellaSwag acc_norm | 60.5% | — | — |
+
+CUDA graphs enabled (no `enforce_eager`). Single-token throughput: **102 tok/s**
+(12.8× over eager mode). Batch-8: **407 tok/s**.
+
+**SOAR baseline (with arcmix calibration):**
+ARC-Easy 67.2%, ARC-Challenge 47.8%, HellaSwag acc_norm 61.4%, Winogrande 58.6%.
+
+#### Optimization Pipeline — Sessions 9–13 (2026-05-19–21) 🟡
+
+SOTA accuracy improvements stacked on the W4A4 baseline, targeting Zyphra's
+published BF16 numbers: GPQA-Diamond 71.0%, MMLU-Pro 74.2%, IFEval 85.58%.
+
+| Task | Status | Notes |
+|------|--------|-------|
+| KV cache FP8 (`kv_cache_dtype=fp8`) | ✅ | Added to all eval + serving scripts. Frees ~1-2 GiB KV cache VRAM. |
+| SOAR global-scale optimizer | ✅ | Replaced max-abs with 25-point log-spaced grid search minimizing FP8 block-scale rounding MSE. +0.9pp HellaSwag. |
+| EBSS calibration (expert-balanced sample selection) | ✅ | 977-sample arcmix corpus reordered to equalize per-expert coverage. Reduced uncalibrated IGS from 340 → 0. Output: `data/calibration/arcmix_ebss/calibration_data.pt`. |
+| Fix zero-IGS from uncalibrated modules (post-hoc) | ✅ | `scripts/fix_uncalibrated_igs.py` patches zero IGS with per-layer median fallback. Applied to all checkpoints. |
+| block_maxes_store OOM fix | ✅ | SOAR hook accumulated unbounded bmax tensors ([65536] per popular expert). Capped at 1024 elements + `gc.collect()` + `malloc_trim(0)` per layer. Peak RSS: 84.7 GB → ~37 GB. |
+| MR-GPTQ (Hessian-weighted quantization + Hadamard rotation) | ✅ | `--mr-gptq` flag. Block-wise Hadamard H16 fused offline into weights + column-by-column Hessian correction. Checkpoint: `zaya1-8b-nvfp4-w4a4-mrgptq-v2/` (8.27 GiB, 0 bad IGS). |
+| Benchmark MR-GPTQ on Zyphra's eval suite | 🟡 | IFEval run (result lost to WSL /tmp clear). GPQA-Diamond blocked on HF gated dataset auth. MMLU-Pro pending. |
+| SingleQuant rotations (ART + URT outlier elimination) | 🔴 | `apply_singlequant_rotations.py` uses `gamma_new = R @ gamma` — incorrect. Element-wise γ does not commute with rotation R; cascades from layer 1 → 26% accuracy. Fix: absorb into preceding linear output weights, not LN gamma. |
+| ARCQuant residual channels | ⬜ | After MR-GPTQ benchmark validated. |
+
+**GPQA auth required**: Visit `https://huggingface.co/datasets/Idavidrein/gpqa`,
+accept terms, then: `HF_TOKEN=<token> python3 scripts/run_full_benchmarks.py --tasks gpqa_diamond`
+
+**Benchmark resume command** (from WSL, `vllm-env` active):
+```bash
+cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
+python3 scripts/run_full_benchmarks.py \
+    --model ./zaya1-8b-nvfp4-w4a4-mrgptq-v2 \
+    --tasks ifeval mmlu_pro \
+    --output results/bench_mrgptq_v2.json
+```
+
 ---
 
 ## Phase 3 — Teacher Trajectory Generation 🟡

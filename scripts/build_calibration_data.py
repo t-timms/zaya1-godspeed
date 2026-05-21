@@ -74,6 +74,26 @@ SOURCE_WEIGHTS_PHASE1: dict[str, float] = {
     "glaive":        0.15,  # tool-use traces (agentic)
 }
 
+# Phase 2 mix: ARC-aware calibration. Adds commonsense reasoning data
+# (arc_easy, arc_challenge, hellaswag) to calibrate MoE expert routing paths
+# that are exercised by those benchmarks. MoE expert sparsity means experts
+# only seen during eval-style inputs may have uncalibrated IGS values.
+# Math reduced to 20% (still dominant), creative/agentic reduced to make room.
+# v1 (2026-05-19): targeting ARC-Easy/Challenge + HellaSwag accuracy recovery.
+SOURCE_WEIGHTS_PHASE2: dict[str, float] = {
+    "math500":        0.10,  # MATH-500
+    "gsm8k":          0.10,  # GSM8K
+    "humaneval":      0.05,  # Python code
+    "mbpp":           0.05,  # Python code
+    "triviaqa":       0.10,  # knowledge QA
+    "alpaca":         0.10,  # instruction-following
+    "writingprompts": 0.05,  # creative style (reduced)
+    "glaive":         0.05,  # tool-use (reduced)
+    "arc_easy":       0.15,  # ARC-Easy training split (commonsense QA)
+    "arc_challenge":  0.10,  # ARC-Challenge training split (harder QA)
+    "hellaswag":      0.15,  # HellaSwag training split (activity completion)
+}
+
 # Legacy mix retained for --legacy-mix flag (reproducibility of the original
 # Stage 1 W4A16 calibration that produced zaya1-8b-nvfp4-ct-gs16).
 SOURCE_WEIGHTS_LEGACY: dict[str, float] = {
@@ -98,6 +118,9 @@ DATASET_PATHS: dict[str, str] = {
     "alpaca":         "yahma/alpaca-cleaned",            # split 'train'
     "writingprompts": "euclaise/writingprompts",         # split 'train' (subsample heavily — 1.4M total)
     "glaive":         "glaiveai/glaive-function-calling-v2",  # split 'train'
+    "arc_easy":       "allenai/ai2_arc",                 # subset 'ARC-Easy', split 'train' (2251 examples)
+    "arc_challenge":  "allenai/ai2_arc",                 # subset 'ARC-Challenge', split 'train' (1119 examples)
+    "hellaswag":      "Rowan/hellaswag",                 # split 'train' (39905 examples)
 }
 
 
@@ -369,6 +392,82 @@ def load_glaive(datasets: Any) -> list[str]:
         return []
 
 
+def load_arc_easy(datasets: Any) -> list[str]:
+    """Load ARC-Easy training split (2251 commonsense reasoning MC questions)."""
+    try:
+        ds = datasets.load_dataset(DATASET_PATHS["arc_easy"], "ARC-Easy", split="train")
+        logger.info("ARC-Easy: loaded %d samples", len(ds))
+        texts: list[str] = []
+        for item in ds:
+            question = item.get("question", "") or ""
+            choices = item.get("choices", {})
+            answer_key = item.get("answerKey", "") or ""
+            if not question:
+                continue
+            choice_texts = choices.get("text", []) if isinstance(choices, dict) else []
+            choice_labels = choices.get("label", []) if isinstance(choices, dict) else []
+            formatted_choices = "\n".join(
+                f"  {lbl}. {txt}" for lbl, txt in zip(choice_labels, choice_texts)
+            )
+            texts.append(
+                f"Question: {question}\n\nChoices:\n{formatted_choices}\n\nAnswer: {answer_key}"
+            )
+        return texts
+    except Exception as e:
+        logger.warning("ARC-Easy load failed: %s", e)
+        return []
+
+
+def load_arc_challenge(datasets: Any) -> list[str]:
+    """Load ARC-Challenge training split (1119 harder commonsense reasoning questions)."""
+    try:
+        ds = datasets.load_dataset(DATASET_PATHS["arc_challenge"], "ARC-Challenge", split="train")
+        logger.info("ARC-Challenge: loaded %d samples", len(ds))
+        texts: list[str] = []
+        for item in ds:
+            question = item.get("question", "") or ""
+            choices = item.get("choices", {})
+            answer_key = item.get("answerKey", "") or ""
+            if not question:
+                continue
+            choice_texts = choices.get("text", []) if isinstance(choices, dict) else []
+            choice_labels = choices.get("label", []) if isinstance(choices, dict) else []
+            formatted_choices = "\n".join(
+                f"  {lbl}. {txt}" for lbl, txt in zip(choice_labels, choice_texts)
+            )
+            texts.append(
+                f"Question: {question}\n\nChoices:\n{formatted_choices}\n\nAnswer: {answer_key}"
+            )
+        return texts
+    except Exception as e:
+        logger.warning("ARC-Challenge load failed: %s", e)
+        return []
+
+
+def load_hellaswag_train(datasets: Any) -> list[str]:
+    """Load HellaSwag training split (39905 activity-completion sentences)."""
+    try:
+        ds = datasets.load_dataset(DATASET_PATHS["hellaswag"], split="train[:8000]")
+        logger.info("HellaSwag: loaded %d samples", len(ds))
+        texts: list[str] = []
+        for item in ds:
+            ctx = item.get("ctx", "") or item.get("activity_label", "") or ""
+            endings = item.get("endings", []) or []
+            label = item.get("label", "")
+            if not ctx or not endings:
+                continue
+            formatted_endings = "\n".join(f"  {i}. {e}" for i, e in enumerate(endings))
+            correct = endings[int(label)] if label != "" and int(label) < len(endings) else ""
+            texts.append(
+                f"Context: {ctx}\n\nContinuations:\n{formatted_endings}"
+                + (f"\n\nCorrect continuation: {correct}" if correct else "")
+            )
+        return texts
+    except Exception as e:
+        logger.warning("HellaSwag train load failed: %s", e)
+        return []
+
+
 def _encode_text_for_packing(tokenizer: Any, text: str, hard_cap: int) -> list[int]:
     """Tokenize one text with the ChatML template, no padding, capped at hard_cap tokens.
 
@@ -584,6 +683,17 @@ def main() -> int:
         help="Use the original 4-source 25/25/25/25 mix (MATH-500, HumanEval, ShareGPT, AIME). "
              "Default is the Phase 1 7-source benchmark-weighted mix.",
     )
+    parser.add_argument(
+        "--arc-mix",
+        action="store_true",
+        help=(
+            "Use the Phase 2 ARC-aware 11-source mix that adds ARC-Easy (15%%), "
+            "ARC-Challenge (10%%), and HellaSwag (15%%) training data. Recommended "
+            "when optimizing for ARC-Easy/Challenge and HellaSwag accuracy. "
+            "MoE expert routing paths exercised by commonsense QA will be better "
+            "calibrated, reducing input_global_scale error for those activation patterns."
+        ),
+    )
     args = parser.parse_args()
 
     # Activate the legacy mix if requested. Default num-samples drops to 512 to match
@@ -593,8 +703,15 @@ def main() -> int:
         SOURCE_WEIGHTS = SOURCE_WEIGHTS_LEGACY
         if args.num_samples == DEFAULT_NUM_SAMPLES:
             args.num_samples = 512
+    elif args.arc_mix:
+        SOURCE_WEIGHTS = SOURCE_WEIGHTS_PHASE2
 
-    mix_name = "LEGACY (4-source 25/25/25/25)" if args.legacy_mix else "PHASE 1 (7-source benchmark-weighted)"
+    if args.legacy_mix:
+        mix_name = "LEGACY (4-source 25/25/25/25)"
+    elif args.arc_mix:
+        mix_name = "PHASE 2 ARC-AWARE (11-source, commonsense+benchmark-weighted)"
+    else:
+        mix_name = "PHASE 1 (7-source benchmark-weighted)"
     logger.info("=== GATE 4: Calibration Dataset Build ===")
     logger.info("Mix:        %s", mix_name)
     logger.info("Model:      %s", args.model_id)
@@ -661,6 +778,18 @@ def main() -> int:
     if "glaive" in SOURCE_WEIGHTS:
         logger.info("Loading Glaive-fn-calling ...")
         sources["glaive"] = load_glaive(datasets)
+
+    if "arc_easy" in SOURCE_WEIGHTS:
+        logger.info("Loading ARC-Easy (train) ...")
+        sources["arc_easy"] = load_arc_easy(datasets)
+
+    if "arc_challenge" in SOURCE_WEIGHTS:
+        logger.info("Loading ARC-Challenge (train) ...")
+        sources["arc_challenge"] = load_arc_challenge(datasets)
+
+    if "hellaswag" in SOURCE_WEIGHTS:
+        logger.info("Loading HellaSwag (train) ...")
+        sources["hellaswag"] = load_hellaswag_train(datasets)
 
     # Report availability
     available = sum(1 for v in sources.values() if v)

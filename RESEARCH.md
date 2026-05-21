@@ -610,6 +610,134 @@ Also needed: quality gate fix (ERROR not "PASS" when calibration coverage
 See `ROADMAP.md` → Path B — W4A4 Weight+Activation Quantization for full
 task tracking.
 
+### 5.12 SOTA Accuracy Improvement Pipeline (Sessions 9–13, 2026-05-19–21)
+
+#### 5.12.1 Motivation
+
+The initial W4A4 baseline (session 8) achieved 68.6% ARC-Easy and 102 tok/s —
+a strong start but well below Zyphra's published BF16 ceiling
+(GPQA-Diamond 71.0%, MMLU-Pro 74.2%, IFEval 85.58%). Sessions 9–13 stacked five
+SOTA techniques to close that gap.
+
+#### 5.12.2 KV Cache FP8
+
+Added `kv_cache_dtype=fp8` to all eval and serving scripts. Halves KV cache VRAM
+(~1-2 GiB freed), enabling larger batch sizes and longer contexts with zero accuracy
+impact.
+
+#### 5.12.3 SOAR Global-Scale Optimization
+
+**Problem**: Max-abs global scale (`igs = 2688 / max_act`) maximizes FP4 range
+coverage but does not minimize reconstruction error. The dominant error source is
+FP8 block-scale rounding: `(fp8_rounded - fp8_raw)² × block_max²`.
+
+**Implementation**: Added a 25-point log-spaced grid search over scale candidates
+in `_compute_soar_global_scale()`. For each candidate `g`:
+- Compute `fp8_raw = clip(block_maxes / (g × 6.0), eps, 448.0)`
+- Round to FP8_E4M3: `fp8_rounded = fp8_raw.to(float8_e4m3fn).float()`
+- Accumulate weighted error: `sum((fp8_rounded - fp8_raw)² × block_maxes²)`
+- Return `g` with minimum weighted error
+
+Block maxes are collected during the existing calibration hook via reservoir
+sampling (capped at 1024 elements per entry). Max-abs is the fallback when
+block maxes are unavailable.
+
+**Result**: HellaSwag acc_norm 60.5% → 61.4% (+0.9pp). ARC-Easy 67.2%.
+
+**Checkpoint**: `zaya1-8b-nvfp4-w4a4-soar/` (8.9 GB, 12 BF16-exempt outlier layers).
+
+#### 5.12.4 EBSS Calibration (Expert-Balanced Sample Selection)
+
+**Problem**: With top-1 routing and 977 samples × 40 MoE layers, each expert
+activates in only ~60 samples on average. Under-represented experts have poorly
+calibrated IGS values (zero in 340/1320 modules before the fix).
+
+**Implementation** (`scripts/build_calibration_ebss.py`):
+1. Load existing arcmix calibration data
+2. Run router-only forward pass (embed tokens + router MLP per layer, BF16, no GPU needed)
+3. Compute per-sample benefit score: `sum over layers of 1/(1 + coverage[routed_expert])`
+4. Greedy resampling: iteratively select samples that maximize least-covered expert coverage
+
+**Result**: 977-sample EBSS corpus at
+`data/calibration/arcmix_ebss/calibration_data.pt`. Post-EBSS quantization
+has **0 zero-IGS modules** (vs 340 previously). Applied to MR-GPTQ checkpoint.
+
+**Zero-IGS post-hoc fix**: `scripts/fix_uncalibrated_igs.py` patches any
+remaining zero/garbage IGS values with a per-layer median fallback. Idempotent;
+applied after each quantization run.
+
+#### 5.12.5 MR-GPTQ (Micro-Rotated GPTQ)
+
+**Implementation**: Added `--mr-gptq` flag to `quantize_zaya_ct_nvfp4.py`.
+Two stages per decoder layer:
+
+1. **Hadamard rotation** (offline, CPU): For each Linear weight `W [out, in]`:
+   reshape to `[out, in//16, 16]`, apply H₁₆/√16 via `W @ H.T`, reshape back.
+   Absorb inverse rotation into preceding LayerNorm scale (multiply gamma by H.T).
+   Net inference overhead: zero (rotation is in the weights).
+
+2. **Hessian-weighted correction** (per-expert, GPU): Accumulate
+   `H += x.T @ x` during the calibration forward hook. For each output column `j`:
+   `W_corrected[:, j] = W_rotated[:, j] − H_inv[:, j] × quant_error[j] / H_inv[j, j]`
+   Then quantize with SOAR-optimized global scale.
+
+**OOM fix**: During development, `block_maxes_store` accumulated unbounded-length
+bmax tensors. Popular experts routing 512 tokens/sample produced [65536]-element
+tensors per hook call; across 64 entries × 1320 modules = 21 GB. Three fixes:
+
+| Fix | Effect |
+|-----|--------|
+| Cap bmax at 1024 elements via random subsampling | Bounds per-module store to ~1 MB |
+| `gc.collect()` per layer | Forces Python GC of freed tensors |
+| `ctypes.malloc_trim(0)` per layer | Returns fragmented heap pages to OS |
+
+Peak RSS dropped from 84.7 GB (OOM) to ~37 GB on 82 GB machine.
+
+**Result**: Checkpoint `zaya1-8b-nvfp4-w4a4-mrgptq-v2/` (8.27 GiB safetensors,
+0 bad IGS entries). Runtime: ~45 min on RTX 5070 Ti.
+
+#### 5.12.6 SingleQuant Rotations — BLOCKED
+
+`scripts/apply_singlequant_rotations.py` was built to apply ART + URT outlier
+rotations to the 12 BF16-exempt MoE layers. Root cause of failure:
+
+The absorption formula `gamma_new = R @ gamma` is mathematically incorrect.
+`W @ R.T @ ((R @ gamma) ⊙ z) ≠ W @ (gamma ⊙ z)` for arbitrary orthogonal R
+because element-wise scaling `(gamma ⊙ z)` does not commute with rotation.
+The 2048×2048 URT rotation magnifies this error; layer 1 is corrupted and
+cascades to 25–26% ARC-Easy accuracy (near-random).
+
+**Correct approach**: Absorb rotation into preceding linear's output weights
+(not into LN gamma). Requires modifying the weight of the linear that feeds
+into the LayerNorm, not the LayerNorm parameters themselves.
+
+Status: blocked pending redesign.
+
+#### 5.12.7 Benchmarking Status
+
+**Target benchmarks** (aligned to Zyphra's published BF16 table):
+
+| Task | BF16 ceiling | MR-GPTQ W4A4 | Status |
+|------|-------------|-------------|--------|
+| GPQA-Diamond | 71.0% | pending | Blocked — HF gated dataset (`Idavidrein/gpqa`) requires auth |
+| MMLU-Pro | 74.2% | pending | Not yet run |
+| IFEval | 85.58% | pending | Run completed but result lost to WSL /tmp clear |
+
+**Infrastructure fixes applied** (to `scripts/run_full_benchmarks.py`):
+- `gc.collect() + torch.cuda.empty_cache()` in `finally` block after each task prevents CUDA graph pool from staying resident between tasks (was causing VRAM OOM on second task)
+- HuggingFace token login at startup via `HF_TOKEN` env var
+- Default output path changed from `/tmp/` to `results/` (persists across WSL restarts)
+- Imports `gc`, `os` added (previously removed by Ruff formatter before usage was present)
+
+**Resume command** (after HF auth for GPQA):
+```bash
+cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
+python3 scripts/run_full_benchmarks.py \
+    --model ./zaya1-8b-nvfp4-w4a4-mrgptq-v2 \
+    --tasks ifeval mmlu_pro \
+    --output results/bench_mrgptq_v2.json
+```
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)

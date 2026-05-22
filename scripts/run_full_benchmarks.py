@@ -63,7 +63,7 @@ TASKS: dict[str, tuple[str, int | None, str]] = {
 
 def build_model_args(
     model_path: str,
-    gpu_mem: float = 0.92,
+    gpu_mem: float = 0.99,
     enforce_eager: bool = False,
 ) -> str:
     args = (
@@ -150,11 +150,6 @@ def print_results_table(
 
 
 def main() -> int:
-    # Disable CUDA graph memory profiling — it reserves 3.5+ GiB for size estimation,
-    # leaving only ~0.7 GiB for KV cache and cutting effective batch concurrency to ~8x.
-    # Without this, MMLU-Pro takes 10+ hours instead of ~2 hours.
-    os.environ.setdefault("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0")
-
     parser = argparse.ArgumentParser(
         description="Benchmark ZAYA1-8B W4A4 against Zyphra's published BF16 numbers"
     )
@@ -178,9 +173,9 @@ def main() -> int:
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.92,
+        default=0.99,
         dest="gpu_mem",
-        help="vLLM gpu_memory_utilization (default: 0.92)",
+        help="vLLM gpu_memory_utilization (default: 0.99)",
     )
     parser.add_argument(
         "--enforce-eager",

@@ -749,19 +749,27 @@ Status: blocked pending redesign — do NOT re-run `apply_singlequant_rotations.
 - NO MR-GPTQ (dropped when mrgptq-v2 was deleted in session 14 cleanup)
 - Smoke test PASSED 2026-05-22 (all 4 prompts coherent, 9.0 tok/s eager)
 
-Note: GPQA-Diamond (`Idavidrein/gpqa`) does NOT require HF auth — accessible
-without a token in lm-eval 0.4.12. The auth requirement was a false alarm from
-session 13; verified accessible 2026-05-22.
+**GPQA-Diamond** (`Idavidrein/gpqa`) IS a gated dataset — HF auth required.
+Auth was completed 2026-05-22; token saved to `/home/ttimm/.cache/huggingface/token`
+in WSL (persists across restarts).
+
+**Performance fix**: The first benchmark run was killed after 2h36min at 23% of
+MMLU-Pro. Root cause: `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1` (default)
+reserves 3.59 GiB for CUDA graph size estimation, leaving only 0.69 GiB for KV
+cache and capping batch concurrency at ~8 sequences. This extends MMLU-Pro from
+~90 min to 10+ hours. Fix: set `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`.
+This is now baked into `run_full_benchmarks.py` via `os.environ.setdefault(...)`.
 
 **Baseline benchmark command**:
 ```bash
 source /home/ttimm/vllm-env/bin/activate
 cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
-python3 scripts/run_full_benchmarks.py \
+nohup python3 scripts/run_full_benchmarks.py \
     --model ./zaya1-8b-nvfp4-w4a4 \
-    --output results/lmeval_w4a4_baseline.json
+    --output results/lmeval_w4a4_baseline.json \
+    > results/bench_baseline.log 2>&1 &
 ```
-Expected runtime: ~80 min. Output: `results/lmeval_w4a4_baseline.json`.
+Expected runtime: ~2-3 hours (with env var fix). Output: `results/lmeval_w4a4_baseline.json`.
 
 **Post-baseline final checkpoint pipeline**:
 ```bash

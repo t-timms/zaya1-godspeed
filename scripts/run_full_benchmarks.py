@@ -63,8 +63,8 @@ TASKS: dict[str, tuple[str, int | None, str]] = {
 
 def build_model_args(
     model_path: str,
-    gpu_mem: float = 0.99,
-    enforce_eager: bool = False,
+    gpu_mem: float = 0.92,
+    enforce_eager: bool = True,
 ) -> str:
     args = (
         f"pretrained={model_path},"
@@ -173,15 +173,15 @@ def main() -> int:
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.99,
+        default=0.92,
         dest="gpu_mem",
-        help="vLLM gpu_memory_utilization (default: 0.99)",
+        help="vLLM gpu_memory_utilization (default: 0.92)",
     )
     parser.add_argument(
-        "--enforce-eager",
-        action="store_true",
+        "--no-enforce-eager",
+        action="store_false",
         dest="enforce_eager",
-        help="Disable CUDA graphs (slower but lower peak memory)",
+        help="Enable CUDA graphs (faster decode but costs 3.7 GiB KV cache on 16 GB GPU)",
     )
     parser.add_argument(
         "--tasks",

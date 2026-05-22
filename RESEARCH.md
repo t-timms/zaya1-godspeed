@@ -610,14 +610,16 @@ Also needed: quality gate fix (ERROR not "PASS" when calibration coverage
 See `ROADMAP.md` → Path B — W4A4 Weight+Activation Quantization for full
 task tracking.
 
-### 5.12 SOTA Accuracy Improvement Pipeline (Sessions 9–13, 2026-05-19–21)
+### 5.12 SOTA Accuracy Improvement Pipeline (Sessions 9–14, 2026-05-19–22)
 
 #### 5.12.1 Motivation
 
 The initial W4A4 baseline (session 8) achieved 68.6% ARC-Easy and 102 tok/s —
 a strong start but well below Zyphra's published BF16 ceiling
-(GPQA-Diamond 71.0%, MMLU-Pro 74.2%, IFEval 85.58%). Sessions 9–13 stacked five
-SOTA techniques to close that gap.
+(GPQA-Diamond 71.0%, MMLU-Pro 74.2%, IFEval 85.58%). Sessions 9–14 stacked
+SOTA techniques to close that gap; the current active checkpoint is
+`./zaya1-8b-nvfp4-w4a4/` (8.84 GiB, 936 W4A4 + 384 BF16, ARC-mix calibration,
+smoke test PASSED 2026-05-22).
 
 #### 5.12.2 KV Cache FP8
 
@@ -694,9 +696,11 @@ tensors per hook call; across 64 entries × 1320 modules = 21 GB. Three fixes:
 Peak RSS dropped from 84.7 GB (OOM) to ~37 GB on 82 GB machine.
 
 **Result**: Checkpoint `zaya1-8b-nvfp4-w4a4-mrgptq-v2/` (8.27 GiB safetensors,
-0 bad IGS entries). Runtime: ~45 min on RTX 5070 Ti.
+0 bad IGS entries). Runtime: ~45 min on RTX 5070 Ti. This checkpoint has since
+been deleted (session 14 disk cleanup); the active checkpoint is
+`./zaya1-8b-nvfp4-w4a4/` (ARC-mix calibration, no MR-GPTQ).
 
-#### 5.12.6 SingleQuant Rotations — BLOCKED
+#### 5.12.6 SingleQuant Rotations — BLOCKED (redesign required)
 
 `scripts/apply_singlequant_rotations.py` was built to apply ART + URT outlier
 rotations to the 12 BF16-exempt MoE layers. Root cause of failure:
@@ -707,35 +711,79 @@ because element-wise scaling `(gamma ⊙ z)` does not commute with rotation.
 The 2048×2048 URT rotation magnifies this error; layer 1 is corrupted and
 cascades to 25–26% ARC-Easy accuracy (near-random).
 
-**Correct approach**: Absorb rotation into preceding linear's output weights
-(not into LN gamma). Requires modifying the weight of the linear that feeds
-into the LayerNorm, not the LayerNorm parameters themselves.
+**Correct approach**: Absorb rotation into the **preceding linear's output
+weights**, not into LN gamma. Concretely:
 
-Status: blocked pending redesign.
+1. For each outlier MoE layer `L` (indices in `quantization_manifest.json`),
+   identify the linear that immediately feeds into its output LayerNorm.
+   For ZAYA1-8B this is `zaya_block.experts.local_experts.M.linear_fc2`
+   (the down-projection of expert M's MLP).
+2. Apply rotation `R` to the activation space: weight transform is
+   `linear_fc2.weight ← linear_fc2.weight @ R.T` (right-multiply along
+   output dim, shape `[out_features, in_features]` → `[out_features, in_features] @ [in_features, in_features]`).
+3. Do NOT modify LN gamma. The LayerNorm then normalizes the rotated
+   activations without any formula error.
+4. Save the rotated BF16 model; then requantize with `--mr-gptq` to refit
+   weights under the new activation distribution.
 
-#### 5.12.7 Benchmarking Status
+Estimated implementation time: ~30 min. The rotation will suppress activation
+outliers in the 12 exempted layers, potentially allowing their threshold to
+rise above 500 and converting some back to W4A4, shrinking the checkpoint.
+
+Status: blocked pending redesign — do NOT re-run `apply_singlequant_rotations.py` as-is.
+
+#### 5.12.7 Benchmarking Status (updated 2026-05-22)
 
 **Target benchmarks** (aligned to Zyphra's published BF16 table):
 
-| Task | BF16 ceiling | MR-GPTQ W4A4 | Status |
-|------|-------------|-------------|--------|
-| GPQA-Diamond | 71.0% | pending | Blocked — HF gated dataset (`Idavidrein/gpqa`) requires auth |
-| MMLU-Pro | 74.2% | pending | Not yet run |
-| IFEval | 85.58% | pending | Run completed but result lost to WSL /tmp clear |
+| Task | BF16 ceiling | ARC-mix W4A4 | Final (rotation+GPTQ) |
+|------|-------------|-------------|----------------------|
+| GPQA-Diamond | 71.0% | pending | pending |
+| MMLU-Pro | 74.2% | pending | pending |
+| IFEval | 85.58% | pending | pending |
 
-**Infrastructure fixes applied** (to `scripts/run_full_benchmarks.py`):
-- `gc.collect() + torch.cuda.empty_cache()` in `finally` block after each task prevents CUDA graph pool from staying resident between tasks (was causing VRAM OOM on second task)
-- HuggingFace token login at startup via `HF_TOKEN` env var
-- Default output path changed from `/tmp/` to `results/` (persists across WSL restarts)
-- Imports `gc`, `os` added (previously removed by Ruff formatter before usage was present)
+**Current checkpoint**: `./zaya1-8b-nvfp4-w4a4/` (8.84 GiB)
+- 936 W4A4 modules, 384 BF16 modules (12 outlier MoE layers)
+- ARC-mix calibration (`data/calibration/arcmix/calibration_data.pt`)
+- 977 samples × 1024 tokens
+- NO MR-GPTQ (dropped when mrgptq-v2 was deleted in session 14 cleanup)
+- Smoke test PASSED 2026-05-22 (all 4 prompts coherent, 9.0 tok/s eager)
 
-**Resume command** (after HF auth for GPQA):
+Note: GPQA-Diamond (`Idavidrein/gpqa`) does NOT require HF auth — accessible
+without a token in lm-eval 0.4.12. The auth requirement was a false alarm from
+session 13; verified accessible 2026-05-22.
+
+**Baseline benchmark command**:
 ```bash
+source /home/ttimm/vllm-env/bin/activate
 cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
 python3 scripts/run_full_benchmarks.py \
-    --model ./zaya1-8b-nvfp4-w4a4-mrgptq-v2 \
-    --tasks ifeval mmlu_pro \
-    --output results/bench_mrgptq_v2.json
+    --model ./zaya1-8b-nvfp4-w4a4 \
+    --output results/lmeval_w4a4_baseline.json
+```
+Expected runtime: ~80 min. Output: `results/lmeval_w4a4_baseline.json`.
+
+**Post-baseline final checkpoint pipeline**:
+```bash
+# Step 1: Fix rotation script and apply (~15 min)
+python3 scripts/apply_singlequant_rotations.py \
+    --input Zyphra/ZAYA1-8B \
+    --manifest zaya1-8b-nvfp4-w4a4/quantization_manifest.json \
+    --output ./zaya1-8b-bf16-rotated
+
+# Step 2: Re-quantize with rotation + MR-GPTQ (~25 min)
+python3 scripts/quantize_zaya_ct_nvfp4.py \
+    --scheme w4a4 \
+    --model-id ./zaya1-8b-bf16-rotated \
+    --mixed-precision-threshold 1000 \
+    --mr-gptq \
+    --arc-mix \
+    --output-dir ./zaya1-8b-nvfp4-w4a4-final
+
+# Step 3: Benchmark final checkpoint (~80 min)
+python3 scripts/run_full_benchmarks.py \
+    --model ./zaya1-8b-nvfp4-w4a4-final \
+    --output results/lmeval_w4a4_final.json
 ```
 
 ### 6.1 Audited Repositories
@@ -885,35 +933,82 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 
 ---
 
-## 12. Next Steps (Updated May 14, 2026, session 2)
+## 12. Next Steps (Updated 2026-05-22, session 14)
 
-### ✅ Complete: NVFP4 Compressed-Tensors Pipeline (Stage 1)
-1. ✅ **Quantized original ZAYA1-8B** → compressed-tensors NVFP4 format (`zaya1-8b-nvfp4-ct-gs16`, group_size=16, 5.04 GB)
-2. ✅ **Saved as safetensors** + `config.json` with `"quant_method": "compressed-tensors"` and weight-only group quantization
-3. ✅ **Serve via vLLM**: Model loads — 4,244/4,244 weights, 5.53 GiB VRAM
-4. ✅ **Generate coherent text**: "The capital of France is" → " Paris.", BST explanation coherent (greedy, bf16)
-5. ✅ **Five vLLM/Zaya patches applied** (idempotent scripts in `scripts/wsl_fix_*.py`):
-   1. `wsl_fix_moe_scale_routing.py` — Route `weight_scale` checkpoint keys to scale params, not weight params
-   2. `wsl_fix_marlin_group_size.py` — Skip Marlin Linear repack for unsupported group sizes, fall back to Python dequant
-   3. `wsl_fix_nvfp4_text_gen.py` fix #1+#2 — Split combined `linear_fc1.weight_packed` AND `linear_fc1.weight_scale` into gate (`w1`) and up (`w3`) halves on load (the `_load_w13` narrowing bug)
-   4. `wsl_fix_nvfp4_text_gen.py` fix #2 — Dequantize NVFP4 `lm_head.weight_packed` + `lm_head.weight_scale` and bind into tied `model.embed_tokens.weight` (default loader silently skipped both keys; broken log f-string hid the skip)
-   5. `wsl_fix_nvfp4_text_gen.py` fix #3 — Rewrite `CompressedTensorsW4A4Nvfp4MoEMethod.apply()` for Path A on-the-fly Python dequant + manual per-expert SwiGLU loop, bypassing Marlin MoE (which corrupts scales for this checkpoint via FP8→S0E5M3 sign-flip) and the WSL-device-mismatched emulation backend
+### ✅ Complete: W4A4 NVFP4 Pipeline (Sessions 1–14)
 
-### Immediate: Benchmarking & Publication
-- Run `lm_eval` against AIME'26 (89.1 baseline), GPQA-Diamond (71.0), MMLU-Pro (74.2), LiveCodeBench (65.8)
-- Compare against FP8 baseline on the same prompts to measure quality drop from NVFP4
-- Publish HuggingFace model card with NVFP4 benchmark scores
-- Write up the five-fix story as a vLLM contribution / blog post
+| Milestone | Session | Status |
+|-----------|---------|--------|
+| NVFP4 CT coherent inference (Path A Python dequant) | 2 | ✅ |
+| SM120 CUTLASS kernels compiled from source | 4 | ✅ |
+| Zyphra vLLM overlay applied | 5 | ✅ |
+| W4A4 checkpoint + layer-wise GPU calibration | 6 | ✅ |
+| Loader + forward pass on SM120 (global-scale bug fixed) | 7 | ✅ |
+| lm-eval baseline (ARC-Easy 67-68%, HellaSwag 60-61%) | 8 | ✅ |
+| CUDA graphs (102 tok/s) | 8 | ✅ |
+| SOAR global-scale optimization | 9 | ✅ |
+| EBSS calibration + MR-GPTQ | 9–13 | ✅ |
+| ARC-mix calibration, mixed-precision checkpoint | 14 | ✅ |
+| Disk cleanup (47 GB freed, active checkpoint preserved) | 14 | ✅ |
+| Smoke test PASSED on active checkpoint | 14 | ✅ |
 
-### Follow-on: Blackwell CUDA Kernel (Stage 2)
-1. **Write custom CUDA kernel** for Blackwell NVFP4 Tensor Core MMA dequant (sm_120)
-2. **Register as vLLM quantization method** — drop-in replacement for Marlin FP4 *and* the Path A Python dequant
-3. **Submit upstream PR** to vLLM — reusable across all NVFP4 CT models
-4. **Re-benchmark** with hardware-accelerated kernel — projecting >10× speedup over the current 0.86 tok/s on the manual loop
-5. **Eliminate Python dequant fallback** entirely — both MoE and CCA attention onto the native kernel
-6. **Drop the bf16-required inference contract** — once accumulation happens in higher-precision Tensor Core registers, fp16 should work
+### 🟡 In Progress: Baseline Benchmarks
 
-### Phase 3-7 (unchanged)
+Run `scripts/run_full_benchmarks.py` on the current `./zaya1-8b-nvfp4-w4a4/`
+checkpoint. All three Zyphra-aligned tasks in one command (~80 min):
+
+```bash
+source /home/ttimm/vllm-env/bin/activate
+cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
+python3 scripts/run_full_benchmarks.py \
+    --model ./zaya1-8b-nvfp4-w4a4 \
+    --output results/lmeval_w4a4_baseline.json
+```
+
+Targets (Zyphra BF16 ceilings):
+- GPQA-Diamond: 71.0%
+- MMLU-Pro: 74.2%
+- IFEval: 85.58%
+
+### ⬜ Final Optimization Pipeline (post-baseline)
+
+1. **Fix rotation absorption bug** in `apply_singlequant_rotations.py`
+   — absorb `R` into `linear_fc2.weight @ R.T` (not into LN gamma)
+   — ~30 min implementation
+
+2. **Apply rotation** to BF16 source weights (~15 min):
+   ```bash
+   python3 scripts/apply_singlequant_rotations.py \
+       --input Zyphra/ZAYA1-8B \
+       --manifest zaya1-8b-nvfp4-w4a4/quantization_manifest.json \
+       --output ./zaya1-8b-bf16-rotated
+   ```
+
+3. **Re-quantize with MR-GPTQ** (~25 min):
+   ```bash
+   python3 scripts/quantize_zaya_ct_nvfp4.py \
+       --scheme w4a4 --model-id ./zaya1-8b-bf16-rotated \
+       --mixed-precision-threshold 1000 --mr-gptq --arc-mix \
+       --output-dir ./zaya1-8b-nvfp4-w4a4-final
+   ```
+
+4. **Benchmark final checkpoint** (~80 min):
+   ```bash
+   python3 scripts/run_full_benchmarks.py \
+       --model ./zaya1-8b-nvfp4-w4a4-final \
+       --output results/lmeval_w4a4_final.json
+   ```
+
+### ⬜ Publication
+
+- Update `PAPER.md` Table 2 with actual benchmark numbers
+- Push final checkpoint to HuggingFace Hub (`t-timms/zaya1-8b-nvfp4-w4a4`)
+- Write vLLM PR: `unquantized.py` one-liner for mixed-precision MoE loading
+- Blog post: end-to-end story — SM120 kernel compilation, global-scale bug,
+  mixed-precision exemption, GPTQ+rotation pipeline
+
+### ⬜ Agentic Fine-Tuning (Phase 3–7, unchanged)
+
 - Phase 3: NVIDIA NIM credentials, Godspeed headless teacher trajectories
 - Phase 5: QLoRA SFT on verified trajectories, GRPO policy improvement
 - Phase 6: BFCL-v4, τ² evaluation

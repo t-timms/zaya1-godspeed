@@ -316,9 +316,9 @@ The model's benchmark position (Table 2) demonstrates that sub-1B active-paramet
 
 ## 8. Limitations and Future Work
 
-**Benchmark coverage**: Standard lm-eval accuracy numbers (ARC, HellaSwag, Winogrande) are reasonable proxies for quantization quality but do not measure ZAYA1-8B's primary capabilities (math reasoning, code, GPQA). The official Zyphra benchmarks use generation-based evaluation (pass@1 for math, execution for code), which requires model output rather than log-likelihood scoring. Running pass@1 AIME/HMMT evaluation on the W4A4 checkpoint would directly quantify quality retention on the model's native tasks but is not tractable without a large-scale inference infrastructure.
+**Benchmark coverage**: The primary evaluation targets—GPQA-Diamond (71.0%), MMLU-Pro (74.2%), IFEval (85.58%)—are the benchmarks Zyphra published for the BF16 reference model, making them the natural comparison ceiling. These are generation-based (model output, not log-likelihood), which reflects the model's actual reasoning quality rather than classification calibration. Standard lm-eval ARC/HellaSwag results are included as quantization-quality proxies. Benchmark runs on the W4A4 checkpoint are in progress as of 2026-05-22; Table 2 will be updated with results.
 
-**BF16 outlier layer penalty**: 12 of 40 MoE layers stay at BF16, contributing ~3.2 GiB of overhead. The fully-W4A4 hypothetical checkpoint would be ~6 GiB—still exceeding a 16 GB GPU's capacity for practical KV cache allocation, but offering more headroom. Rotation-based methods (QuaRot [Ashkboos et al., 2024]) suppress activation outliers by applying orthogonal transforms before quantization; applying these to ZAYA1-8B's MoE layers could eliminate or reduce the BF16 exemptions. The FusedMoE uniform quantization constraint means per-expert rotation would require integrating rotation matrices into the fused kernel path, which is non-trivial.
+**BF16 outlier layer penalty**: 12 of 40 MoE layers stay at BF16, contributing ~3.2 GiB of overhead. The fully-W4A4 hypothetical checkpoint would be ~6 GiB. Rotation-based methods (QuaRot [Ashkboos et al., 2024]) suppress activation outliers by applying orthogonal transforms before quantization; applying these to ZAYA1-8B's MoE layers could eliminate or reduce the BF16 exemptions. The FusedMoE uniform quantization constraint means the rotation must be absorbed into the preceding linear's output weights (not into the LayerNorm gamma, which does not commute with rotation), then the rotated BF16 model is re-quantized.
 
 **Single-GPU scope**: All results are from a single RTX 5070 Ti (SM120). Tensor-parallel deployment across multiple Blackwell GPUs is not tested and may require additional patches for the mixed-precision layer routing.
 
@@ -326,7 +326,8 @@ The model's benchmark position (Table 2) demonstrates that sub-1B active-paramet
 
 **Future work**:
 - **Upstream vLLM patch**: submit the `unquantized.py` one-liner as a PR to enable mixed-precision NVFP4 MoE loading without source patching.
-- **Rotation-based outlier suppression**: QuaRot integration for MoE layers to achieve a fully-W4A4 ~6 GiB checkpoint.
+- **Rotation-based outlier suppression**: QuaRot/SingleQuant integration for MoE layers — absorb rotation into preceding linear output weights, then re-quantize with MR-GPTQ. Expected to convert some BF16-exempt layers back to W4A4 and reduce the checkpoint from 8.84 GiB toward ~7–8 GiB.
+- **MR-GPTQ weight correction**: Hessian-weighted column-by-column correction during calibration (arXiv:2509.23202). Implemented in `scripts/quantize_zaya_ct_nvfp4.py` (`--mr-gptq` flag); to be applied on the rotated checkpoint. Expected +2–4 pp on hard reasoning tasks.
 - **Agentic fine-tuning**: use this W4A4 checkpoint as the inference backend for the target BFCL-v4/τ² improvement goal (SFT+GRPO on multi-step tool-use trajectories).
 - **Generation-based eval**: pass@1 evaluation on AIME 2026 samples to directly quantify W4A4 quality retention on the model's primary benchmark.
 

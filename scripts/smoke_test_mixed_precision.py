@@ -62,7 +62,8 @@ def main() -> int:
     try:
         from vllm import LLM, SamplingParams
     except ImportError:
-        print("ERROR: vllm not installed")
+        print("ERROR: vllm not importable — activate the env first:")
+        print("  source /home/ttimm/vllm-env/bin/activate")
         return 1
 
     try:

@@ -37,7 +37,7 @@ from pathlib import Path
 
 DEFAULT_MODEL = (
     "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/"
-    "zaya1-8b-nvfp4-w4a4-mrgptq-v2"
+    "zaya1-8b-nvfp4-w4a4"
 )
 
 # Zyphra's published BF16 numbers — the ceiling we're compressing toward.

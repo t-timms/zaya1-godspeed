@@ -259,7 +259,20 @@ CUDA graphs enabled (no `enforce_eager`). Single-token throughput: **102 tok/s**
 **SOAR baseline (with arcmix calibration):**
 ARC-Easy 67.2%, ARC-Challenge 47.8%, HellaSwag acc_norm 61.4%, Winogrande 58.6%.
 
-#### Optimization Pipeline — Sessions 9–13 (2026-05-19–21) 🟡
+#### Current Checkpoint — Session 14 (2026-05-22) 🟢
+
+**Active checkpoint**: `./zaya1-8b-nvfp4-w4a4/` (8.84 GiB)
+- 936 W4A4 modules + 384 BF16-exempt (12 outlier MoE layers, threshold=500)
+- ARC-mix calibration (977 samples: ARC-Easy 15%, ARC-Challenge 10%, HellaSwag 15%, math/code/knowledge mix)
+- NO GPTQ correction, NO rotation (both are the next optimization step)
+- Smoke test PASSED 2026-05-22: all 4 generation prompts coherent, no token collapse
+
+**Disk cleanup (2026-05-22)**: Deleted `zaya1-8b-nvfp4-w4a4-soar`, `zaya1-8b-nvfp4-w4a4-mrgptq-v2`,
+`zaya1-8b-nvfp4-w4a4-sq-mrgptq`, and `zaya1-8b-bf16-rotated` to recover 47 GB. Only
+`zaya1-8b-nvfp4-w4a4` (current working checkpoint) remains. `models--Zyphra--ZAYA1-8B`
+(17 GB) is preserved in the WSL HF cache for re-quantization.
+
+#### Optimization Pipeline — Sessions 9–14 (2026-05-19–22) 🟡
 
 SOTA accuracy improvements stacked on the W4A4 baseline, targeting Zyphra's
 published BF16 numbers: GPQA-Diamond 71.0%, MMLU-Pro 74.2%, IFEval 85.58%.
@@ -271,21 +284,42 @@ published BF16 numbers: GPQA-Diamond 71.0%, MMLU-Pro 74.2%, IFEval 85.58%.
 | EBSS calibration (expert-balanced sample selection) | ✅ | 977-sample arcmix corpus reordered to equalize per-expert coverage. Reduced uncalibrated IGS from 340 → 0. Output: `data/calibration/arcmix_ebss/calibration_data.pt`. |
 | Fix zero-IGS from uncalibrated modules (post-hoc) | ✅ | `scripts/fix_uncalibrated_igs.py` patches zero IGS with per-layer median fallback. Applied to all checkpoints. |
 | block_maxes_store OOM fix | ✅ | SOAR hook accumulated unbounded bmax tensors ([65536] per popular expert). Capped at 1024 elements + `gc.collect()` + `malloc_trim(0)` per layer. Peak RSS: 84.7 GB → ~37 GB. |
-| MR-GPTQ (Hessian-weighted quantization + Hadamard rotation) | ✅ | `--mr-gptq` flag. Block-wise Hadamard H16 fused offline into weights + column-by-column Hessian correction. Checkpoint: `zaya1-8b-nvfp4-w4a4-mrgptq-v2/` (8.27 GiB, 0 bad IGS). |
-| Benchmark MR-GPTQ on Zyphra's eval suite | 🟡 | IFEval run (result lost to WSL /tmp clear). GPQA-Diamond blocked on HF gated dataset auth. MMLU-Pro pending. |
-| SingleQuant rotations (ART + URT outlier elimination) | 🔴 | `apply_singlequant_rotations.py` uses `gamma_new = R @ gamma` — incorrect. Element-wise γ does not commute with rotation R; cascades from layer 1 → 26% accuracy. Fix: absorb into preceding linear output weights, not LN gamma. |
-| ARCQuant residual channels | ⬜ | After MR-GPTQ benchmark validated. |
+| MR-GPTQ (`--mr-gptq` flag) | ✅ | Column-by-column Hessian correction per-layer during calibration. Adds ~30% to calibration time. Expected: +2-4pp on hard reasoning tasks. Flag exists — not yet benchmarked against Zyphra's suite. |
+| ARC-mix calibration (Session 14) | ✅ | ARC-Easy 15%, ARC-Challenge 10%, HellaSwag 15% added to calibration mix. Current checkpoint re-quantized with this mix + mixed-precision. |
+| Baseline benchmarks — GPQA/MMLU-Pro/IFEval | 🟡 | **IN PROGRESS 2026-05-22.** First run on current mixed-precision checkpoint (no GPTQ). Establishes baseline for the final optimization step. |
+| SingleQuant rotation (ART + URT outlier elimination) | 🔴 | `apply_singlequant_rotations.py` exists but has gamma absorption bug: `gamma_new = R @ gamma` is mathematically wrong (element-wise γ doesn't commute with R). **Fix**: absorb rotation into preceding linear's OUTPUT weights, not LN gamma. Script needs this patch before use. Base model cached in WSL HF cache (`models--Zyphra--ZAYA1-8B`, 17 GB) — no re-download needed. |
+| **Final checkpoint: Rotation + GPTQ + mixed-precision** | ⬜ | After baseline benchmarks complete. Fix rotation script → apply rotation (~15 min) → re-quantize with `--mr-gptq --mixed-precision-threshold 1000 --arc-mix` (~25 min) → benchmark (~80 min). Threshold 1000 because rotation suppresses outliers, fewer layers need BF16 exemption. |
+| MoE tuning config (RTX 5070 Ti) | ⬜ | Missing: `E=16,N=2048,device_name=NVIDIA_GeForce_RTX_5070_Ti.json`. Affects TRITON MoE throughput for BF16-exempt layers only. Generate via `python -m vllm.model_executor.layers.fused_moe.benchmark`. Not a blocker for accuracy benchmarks. |
+| ARCQuant residual channels | ⬜ | After final checkpoint benchmarked. |
 
-**GPQA auth required**: Visit `https://huggingface.co/datasets/Idavidrein/gpqa`,
-accept terms, then: `HF_TOKEN=<token> python3 scripts/run_full_benchmarks.py --tasks gpqa_diamond`
-
-**Benchmark resume command** (from WSL, `vllm-env` active):
+**Baseline benchmark command** (from WSL, `vllm-env` active):
 ```bash
 cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
-python3 scripts/run_full_benchmarks.py \
-    --model ./zaya1-8b-nvfp4-w4a4-mrgptq-v2 \
-    --tasks ifeval mmlu_pro \
-    --output results/bench_mrgptq_v2.json
+python3 scripts/run_full_benchmarks.py
+# Default model: ./zaya1-8b-nvfp4-w4a4 — output: results/lmeval_w4a4_zyphra.json
+```
+
+**Final checkpoint pipeline** (run after baseline benchmarks complete):
+```bash
+# Step 1 — Fix rotation script gamma absorption (edit apply_singlequant_rotations.py)
+# Absorb R into preceding linear's output weights, not LN gamma
+
+# Step 2 — Apply rotation to 12 outlier layers (~15 min)
+python3 scripts/apply_singlequant_rotations.py \
+    --input Zyphra/ZAYA1-8B \
+    --manifest zaya1-8b-nvfp4-w4a4/quantization_manifest.json \
+    --output zaya1-8b-bf16-rotated
+
+# Step 3 — Re-quantize with GPTQ + higher threshold (~25 min)
+python3 scripts/quantize_zaya_ct_nvfp4.py --scheme w4a4 \
+    --model-id ./zaya1-8b-bf16-rotated \
+    --mixed-precision-threshold 1000 \
+    --mr-gptq --arc-mix \
+    --output-dir ./zaya1-8b-nvfp4-w4a4-final
+
+# Step 4 — Benchmark final checkpoint (~80 min)
+python3 scripts/run_full_benchmarks.py --model ./zaya1-8b-nvfp4-w4a4-final \
+    --output results/lmeval_w4a4_final.json
 ```
 
 ---

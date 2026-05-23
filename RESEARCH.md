@@ -749,27 +749,36 @@ Status: blocked pending redesign — do NOT re-run `apply_singlequant_rotations.
 - NO MR-GPTQ (dropped when mrgptq-v2 was deleted in session 14 cleanup)
 - Smoke test PASSED 2026-05-22 (all 4 prompts coherent, 9.0 tok/s eager)
 
-**GPQA-Diamond** (`Idavidrein/gpqa`) IS a gated dataset — HF auth required.
-Auth was completed 2026-05-22; token saved to `/home/ttimm/.cache/huggingface/token`
-in WSL (persists across restarts).
+**GPQA-Diamond** (`Idavidrein/gpqa`) is gated — requires your HF account to be
+approved at `huggingface.co/datasets/Idavidrein/gpqa` (click "Access repository").
+A token alone is not sufficient. HF token saved to `/home/ttimm/.cache/huggingface/token`
+in WSL. MMLU-Pro and IFEval do not require auth.
 
-**Performance fix**: The first benchmark run was killed after 2h36min at 23% of
-MMLU-Pro. Root cause: `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1` (default)
-reserves 3.59 GiB for CUDA graph size estimation, leaving only 0.69 GiB for KV
-cache and capping batch concurrency at ~8 sequences. This extends MMLU-Pro from
-~90 min to 10+ hours. Fix: set `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`.
-This is now baked into `run_full_benchmarks.py` via `os.environ.setdefault(...)`.
+**VRAM constraints on this machine** (15.92 GiB usable, ~14.66 GiB free at startup):
 
-**Baseline benchmark command**:
+| Config | KV Cache | Outcome |
+|--------|----------|---------|
+| gpu_mem=0.92, CUDA graphs ON | 0.69 GiB / ~8x concurrency | 11+ hr MMLU-Pro |
+| gpu_mem=0.92, graphs OFF via env var | 4.56 GiB allocated but VRAM overcommitted | 10x slowdown, OOM |
+| gpu_mem=0.99, CUDA graphs ON | — | Startup OOM (needs 15.76 GiB) |
+| **gpu_mem=0.92, enforce_eager=True** | **4.68 GiB / ~53x concurrency** | ✅ Correct |
+
+`enforce_eager=True` skips CUDA graph capture (saves 3.71 GiB). MMLU-Pro is
+pure log-likelihood (zero output tokens) so CUDA graphs provide no benefit;
+the 53x batching improvement dominates. `run_full_benchmarks.py` now defaults
+to `enforce_eager=True`; override with `--no-enforce-eager`.
+
+**Baseline benchmark command** (MMLU-Pro + IFEval; run GPQA separately after HF approval):
 ```bash
 source /home/ttimm/vllm-env/bin/activate
 cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
-nohup python3 scripts/run_full_benchmarks.py \
+python3 scripts/run_full_benchmarks.py \
     --model ./zaya1-8b-nvfp4-w4a4 \
+    --tasks mmlu_pro ifeval \
     --output results/lmeval_w4a4_baseline.json \
     > results/bench_baseline.log 2>&1 &
 ```
-Expected runtime: ~2-3 hours (with env var fix). Output: `results/lmeval_w4a4_baseline.json`.
+Expected runtime: ~2 hours. Output: `results/lmeval_w4a4_baseline.json`.
 
 **Post-baseline final checkpoint pipeline**:
 ```bash

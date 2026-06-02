@@ -242,10 +242,7 @@ def fix_zaya() -> bool:
     if ZAYA_OLD_W13_LOAD in new:
         new = new.replace(ZAYA_OLD_W13_LOAD, ZAYA_NEW_W13_LOAD)
         print("  [FIX] Split w13_weight_packed into gate/up halves on load")
-    elif (
-        "FusedMoE.weight_loader with shard_id=\"w1\" narrows" in new
-        or 'shard_id="w1" narrows' in new
-    ):
+    elif 'FusedMoE.weight_loader with shard_id="w1" narrows' in new or 'shard_id="w1" narrows' in new:
         print("  [OK]  w13_weight_packed already split")
     else:
         print("  [WARN] Could not find w13 packed load block")

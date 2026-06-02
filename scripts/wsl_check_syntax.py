@@ -1,4 +1,6 @@
-import py_compile, sys
+import py_compile
+import sys
+
 p = "/root/vllm-ct-env/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py"
 try:
     py_compile.compile(p, doraise=True)

@@ -37,16 +37,12 @@ import torch
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHECKPOINT = (
-    "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-w4a4"
-)
+DEFAULT_CHECKPOINT = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-w4a4"
 DEFAULT_INPUT = (
-    "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/"
-    "data/calibration/arcmix/calibration_data.pt"
+    "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/data/calibration/arcmix/calibration_data.pt"
 )
 DEFAULT_OUTPUT = (
-    "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/"
-    "data/calibration/arcmix_ebss/calibration_data.pt"
+    "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/data/calibration/arcmix_ebss/calibration_data.pt"
 )
 
 NUM_EXPERTS = 16  # ZAYA1-8B: 16 experts per MoE layer, top-1 routing
@@ -55,6 +51,7 @@ NUM_EXPERTS = 16  # ZAYA1-8B: 16 experts per MoE layer, top-1 routing
 # ─────────────────────────────────────────────────────────────────
 # Router weight extraction
 # ─────────────────────────────────────────────────────────────────
+
 
 def load_router_weights(checkpoint_dir: str) -> dict[int, dict[str, torch.Tensor]]:
     """Extract router MLP weights from the checkpoint (BF16, CPU).
@@ -114,6 +111,7 @@ def load_router_weights(checkpoint_dir: str) -> dict[int, dict[str, torch.Tensor
 # ─────────────────────────────────────────────────────────────────
 # Lightweight router forward pass
 # ─────────────────────────────────────────────────────────────────
+
 
 def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     rms = x.float().pow(2).mean(-1, keepdim=True).add(eps).rsqrt()
@@ -176,10 +174,11 @@ def router_forward(
 # Expert activation profiling
 # ─────────────────────────────────────────────────────────────────
 
+
 def profile_expert_activations(
     calibration_tensor: torch.Tensor,  # [N, seq_len]
     layer_routers: dict[int, dict[str, torch.Tensor]],
-    embed_weight: torch.Tensor,         # [vocab, hidden]
+    embed_weight: torch.Tensor,  # [vocab, hidden]
     num_experts: int = NUM_EXPERTS,
 ) -> torch.Tensor:
     """Run router-only forward pass over all calibration samples.
@@ -196,7 +195,9 @@ def profile_expert_activations(
 
     logger.info(
         "Profiling expert activations: %d samples × %d MoE layers × %d experts...",
-        n_samples, n_moe_layers, num_experts,
+        n_samples,
+        n_moe_layers,
+        num_experts,
     )
     t0 = time.time()
 
@@ -227,6 +228,7 @@ def profile_expert_activations(
 # ─────────────────────────────────────────────────────────────────
 # Greedy EBSS resampling
 # ─────────────────────────────────────────────────────────────────
+
 
 def ebss_resample(
     expert_counts: torch.Tensor,  # [N, n_moe_layers, num_experts]
@@ -276,7 +278,10 @@ def ebss_resample(
             max_cov = cumulative_coverage.max().item()
             logger.info(
                 "  EBSS step %d/%d: min_expert_coverage=%.0f max=%.0f ratio=%.2f",
-                step, target_n, min_cov, max_cov,
+                step,
+                target_n,
+                min_cov,
+                max_cov,
                 min_cov / max(max_cov, 1),
             )
 
@@ -287,10 +292,9 @@ def ebss_resample(
 # Main
 # ─────────────────────────────────────────────────────────────────
 
+
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Expert-Balanced Sample Selection (EBSS) for NVFP4 calibration"
-    )
+    parser = argparse.ArgumentParser(description="Expert-Balanced Sample Selection (EBSS) for NVFP4 calibration")
     parser.add_argument("--input", default=DEFAULT_INPUT, help="Input calibration_data.pt")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Output calibration_data.pt")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT, help="W4A4 checkpoint directory")
@@ -314,6 +318,7 @@ def main() -> int:
     layer_routers = load_router_weights(args.checkpoint)
 
     from safetensors.torch import load_file as _load_file
+
     ckpt_path = Path(args.checkpoint)
 
     # Load embed_tokens.weight
@@ -331,9 +336,7 @@ def main() -> int:
     logger.info("embed_tokens.weight shape: %s", list(embed_weight.shape))
 
     # ── Profile expert activations ─────────────────────────────
-    expert_counts = profile_expert_activations(
-        cal_tensor, layer_routers, embed_weight, args.num_experts
-    )
+    expert_counts = profile_expert_activations(cal_tensor, layer_routers, embed_weight, args.num_experts)
 
     # ── Coverage statistics ────────────────────────────────────
     # expert_coverage[e] = total tokens routed to expert e across all samples + layers
@@ -368,7 +371,8 @@ def main() -> int:
     imbalance_after = (coverage_after.min() / coverage_after.max()).item()
     logger.info(
         "  Imbalance ratio: %.2f → %.2f (higher is better, 1.0 = perfect balance)",
-        imbalance_before, imbalance_after,
+        imbalance_before,
+        imbalance_after,
     )
 
     # ── Save output ────────────────────────────────────────────

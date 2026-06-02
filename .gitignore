@@ -59,8 +59,8 @@ zaya1-8b-nvfp4-w4a4-mrgptq-v2/
 # Session handoff (local only)
 SESSION_HANDOFF.md
 
-# Benchmark results (large JSONs)
-results/*.json
+# Benchmark results (machine-specific generated artifacts: JSONs + run logs)
+results/
 
 # Training outputs
 checkpoints/

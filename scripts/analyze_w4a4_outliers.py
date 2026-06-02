@@ -19,8 +19,7 @@ import safetensors.torch as st
 
 GLOBAL_SCALE_NUM = 2688.0  # = FP8_E4M3_MAX * FP4_E2M1_MAX
 DEFAULT_PATH = Path(
-    "/mnt/c/Users/ttimm/Documents/Project Portfolio/"
-    "zaya1-godspeed/zaya1-8b-nvfp4-w4a4/model.safetensors"
+    "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-w4a4/model.safetensors"
 )
 
 
@@ -48,7 +47,7 @@ def main() -> int:
     print(f"# {len(above)} above max_abs={args.threshold}")
     print()
     print(f"{'rank':>4}  {'max_abs(x)':>11}  {'effective_loss':>14}  module")
-    print(f"{'-'*4}  {'-'*11}  {'-'*14}  {'-'*60}")
+    print(f"{'-' * 4}  {'-' * 11}  {'-' * 14}  {'-' * 60}")
 
     for i, (ma, k) in enumerate(rows[: args.top]):
         # If max_abs/6 > 448 the per-block fp8 scale saturates and the

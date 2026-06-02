@@ -27,13 +27,13 @@ def fix() -> bool:
 
     # Fix the apply_weights fallback to validate global_scale
     old = (
-        "            wgs = getattr(layer, \"_weight_global_scale_data\", None)\n"
+        '            wgs = getattr(layer, "_weight_global_scale_data", None)\n'
         "            m, nh = wq.shape\n"
         "            w = unpack_fp4_from_uint8(wq, m, nh * 2)\n"
         "            w = dequantize(x_q=w, scale=ws.float(), global_scale=wgs, dtype=ws.float().dtype)"
     )
     new = (
-        "            wgs = getattr(layer, \"_weight_global_scale_data\", None)\n"
+        '            wgs = getattr(layer, "_weight_global_scale_data", None)\n'
         "            # Skip global_scale if uninitialized (all zeros/NaN from torch.empty).\n"
         "            # Missing from checkpoint (symmetric per-group quant, no per-channel rescale).\n"
         "            if wgs is not None and (wgs.abs().max() < 1e-10 or torch.isnan(wgs).any()):\n"

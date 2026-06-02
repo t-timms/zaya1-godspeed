@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Add raw packed data diagnostic to MoE _dequant_experts."""
+
 from pathlib import Path
 
-p = Path("/home/ttimm/vllm-src/vllm/model_executor/layers/quantization/"
-         "compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_nvfp4.py")
+p = Path(
+    "/home/ttimm/vllm-src/vllm/model_executor/layers/quantization/"
+    "compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_nvfp4.py"
+)
 c = p.read_text()
 
 old = """        from compressed_tensors.compressors.nvfp4.helpers import (

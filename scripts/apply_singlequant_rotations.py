@@ -63,22 +63,24 @@ GROUP_SIZE = 16  # Must match NVFP4 quantization group size
 # Rotation utilities
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _hadamard_matrix(n: int) -> torch.Tensor:
     """Normalized Walsh-Hadamard matrix of size n (must be power of 2)."""
     try:
         from scipy.linalg import hadamard as _h
-        return torch.from_numpy(_h(n).astype("float32")) / (n ** 0.5)
+
+        return torch.from_numpy(_h(n).astype("float32")) / (n**0.5)
     except ImportError:
         pass
     if n == 1:
         return torch.ones(1, 1)
     H_half = _hadamard_matrix(n // 2)
     H = torch.zeros(n, n)
-    H[:n // 2, :n // 2] = H_half
-    H[:n // 2, n // 2:] = H_half
-    H[n // 2:, :n // 2] = H_half
-    H[n // 2:, n // 2:] = -H_half
-    return H / (2 ** 0.5)
+    H[: n // 2, : n // 2] = H_half
+    H[: n // 2, n // 2 :] = H_half
+    H[n // 2 :, : n // 2] = H_half
+    H[n // 2 :, n // 2 :] = -H_half
+    return H / (2**0.5)
 
 
 def _givens_rotation(c: int, j: int, theta: float, n: int) -> torch.Tensor:
@@ -178,8 +180,7 @@ def _rotate_layernorm(gamma: torch.Tensor, R: torch.Tensor, group_size: int = GR
     """
     hidden = gamma.shape[0]
     assert hidden % group_size == 0 or R.shape[0] == hidden, (
-        f"gamma dim {hidden} not divisible by group_size {group_size} and "
-        f"R is not full-hidden ({R.shape})"
+        f"gamma dim {hidden} not divisible by group_size {group_size} and R is not full-hidden ({R.shape})"
     )
 
     gamma_f = gamma.float()
@@ -188,7 +189,7 @@ def _rotate_layernorm(gamma: torch.Tensor, R: torch.Tensor, group_size: int = GR
     else:
         # Per-group: apply R to each group of group_size channels
         gamma_new = gamma_f.reshape(-1, group_size)  # [n_groups, group_size]
-        gamma_new = (R @ gamma_new.T).T              # [n_groups, group_size]
+        gamma_new = (R @ gamma_new.T).T  # [n_groups, group_size]
         gamma_new = gamma_new.reshape(-1)
 
     return gamma_new.to(gamma.dtype)
@@ -197,6 +198,7 @@ def _rotate_layernorm(gamma: torch.Tensor, R: torch.Tensor, group_size: int = GR
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-layer rotation pipeline
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _find_pre_moe_norm(
     state_dict: dict[str, torch.Tensor],
@@ -224,8 +226,11 @@ def _find_pre_moe_norm(
     # Fallback: search all norm weights under this layer, filtered by hidden_dim
     prefix = f"model.layers.{layer_idx}."
     norm_keys = [
-        k for k in state_dict
-        if k.startswith(prefix) and "norm" in k and k.endswith(".weight")
+        k
+        for k in state_dict
+        if k.startswith(prefix)
+        and "norm" in k
+        and k.endswith(".weight")
         and (hidden_dim is None or state_dict[k].shape[0] == hidden_dim)
     ]
     if norm_keys:
@@ -300,10 +305,7 @@ def apply_rotations_to_layer(
         logger.warning("  L%d: could not find pre-MoE RMSNorm — rotation NOT absorbed", layer_idx)
 
     # Note: fc2 skipped — SwiGLU gate nonlinearity prevents clean absorption
-    fc2_count = sum(
-        1 for k in state_dict
-        if k.startswith(prefix) and "linear_fc2" in k and k.endswith(".weight")
-    )
+    fc2_count = sum(1 for k in state_dict if k.startswith(prefix) and "linear_fc2" in k and k.endswith(".weight"))
     modified["skipped_fc2"] = fc2_count
 
     return modified
@@ -313,13 +315,13 @@ def apply_rotations_to_layer(
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Apply SingleQuant ART+URT rotations to BF16 ZAYA1-8B for outlier elimination"
     )
     parser.add_argument(
-        "--input", default=DEFAULT_INPUT,
-        help=f"Source BF16 model (HF repo ID or local path). Default: {DEFAULT_INPUT}"
+        "--input", default=DEFAULT_INPUT, help=f"Source BF16 model (HF repo ID or local path). Default: {DEFAULT_INPUT}"
     )
     parser.add_argument(
         "--manifest",
@@ -327,15 +329,16 @@ def main() -> int:
         help="Path to quantization_manifest.json from a prior W4A4 run (provides outlier_layers list).",
     )
     parser.add_argument(
-        "--output", default="./zaya1-8b-bf16-rotated",
-        help="Output directory for the rotated BF16 checkpoint."
+        "--output", default="./zaya1-8b-bf16-rotated", help="Output directory for the rotated BF16 checkpoint."
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-art", action="store_true", help="Skip ART Givens rotations")
     parser.add_argument("--no-urt", action="store_true", help="Skip URT random orthogonal rotation")
     parser.add_argument(
         "--outlier-channels",
-        type=int, nargs="+", default=None,
+        type=int,
+        nargs="+",
+        default=None,
         help="Override outlier channel indices for ART (default: derived from activation statistics).",
     )
     args = parser.parse_args()
@@ -369,6 +372,7 @@ def main() -> int:
     logger.info("Loading BF16 model from %s ...", args.input)
     t0 = time.time()
     import transformers
+
     model = transformers.AutoModelForCausalLM.from_pretrained(
         args.input,
         torch_dtype=torch.bfloat16,
@@ -385,14 +389,11 @@ def main() -> int:
     total_norm = 0
     total_skipped_fc2 = 0
 
-    for layer_idx in (outlier_layers if outlier_layers else []):
+    for layer_idx in outlier_layers if outlier_layers else []:
         logger.info("Processing layer %d ...", layer_idx)
 
         fc1_keys = [
-            k for k in state_dict
-            if f"model.layers.{layer_idx}." in k
-            and "linear_fc1" in k
-            and k.endswith(".weight")
+            k for k in state_dict if f"model.layers.{layer_idx}." in k and "linear_fc1" in k and k.endswith(".weight")
         ]
         if not fc1_keys:
             logger.warning("  L%d: no fc1 weights found, skipping", layer_idx)
@@ -435,7 +436,9 @@ def main() -> int:
             topk = activation_max_proxy.topk(k)
             outlier_channels = topk.indices.tolist()
             logger.info(
-                "  L%d: top-%d outlier channels (max proxy=%.3f)", layer_idx, k,
+                "  L%d: top-%d outlier channels (max proxy=%.3f)",
+                layer_idx,
+                k,
                 float(activation_max_proxy.max().item()),
             )
 
@@ -454,7 +457,9 @@ def main() -> int:
 
     logger.info(
         "Rotations applied: %d fc1 weights, %d LN weights, %d fc2 skipped (SwiGLU)",
-        total_fc1, total_norm, total_skipped_fc2,
+        total_fc1,
+        total_norm,
+        total_skipped_fc2,
     )
 
     # ── Save rotated BF16 model ───────────────────────────────
@@ -509,7 +514,8 @@ def main() -> int:
         "  python3 scripts/quantize_zaya_ct_nvfp4.py --scheme w4a4 \\\n"
         "      --model-id %s \\\n"
         "      --mixed-precision-threshold 1000.0 \\\n"
-        "      --output-dir ./zaya1-8b-nvfp4-w4a4-sq", out_path,
+        "      --output-dir ./zaya1-8b-nvfp4-w4a4-sq",
+        out_path,
     )
     return 0
 

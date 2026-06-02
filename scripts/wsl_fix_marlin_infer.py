@@ -3,6 +3,7 @@
 Module has size_n=17 (CCA router MLP, in_features=34 packed → 17), which Marlin can't handle.
 Set a flag on layer.weight_packed so apply_fp4_marlin_linear can fall back to non-Marlin dequant.
 """
+
 p = "/root/vllm-ct-env/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/marlin_utils_fp4.py"
 with open(p) as f:
     c = f.read()
@@ -46,7 +47,7 @@ new2 = """    if getattr(weight, "_marlin_repack_skipped", False) or getattr(wei
 c = c.replace(old2, new2)
 
 # Need torch import in the file
-if 'import torch' not in c[:100]:
+if "import torch" not in c[:100]:
     # Find the first import and add torch
     c = c.replace("from typing import", "import torch\nfrom typing import")
 

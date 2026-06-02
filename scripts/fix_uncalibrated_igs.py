@@ -28,7 +28,7 @@ import safetensors.torch as st
 import torch
 
 CHECKPOINT_DEFAULT = "zaya1-8b-nvfp4-w4a4-sq-mrgptq"
-IGS_VALID_MIN = 0.5     # below this → treated as bad (igs<0.5 implies max_act>5376)
+IGS_VALID_MIN = 0.5  # below this → treated as bad (igs<0.5 implies max_act>5376)
 IGS_VALID_MAX = 1400.0  # above this → treated as bad
 
 
@@ -50,9 +50,7 @@ def main() -> None:
     print(f"Loading {safetensors_path} ...")
     tensors = st.load_file(str(safetensors_path))
 
-    layer_re = re.compile(
-        r"model\.layers\.(\d+)\..*\.(linear_fc[12])\.input_global_scale"
-    )
+    layer_re = re.compile(r"model\.layers\.(\d+)\..*\.(linear_fc[12])\.input_global_scale")
 
     # ── Separate good from bad ──────────────────────────────────────────────
     good_by_key: dict[tuple[int, str], list[float]] = {}  # (layer, fc_type) → values
@@ -98,7 +96,7 @@ def main() -> None:
         fallback = None
         for radius in range(0, 40):
             candidates: list[float] = []
-            for delta in (range(0, radius + 1) if radius == 0 else [-radius, radius]):
+            for delta in range(0, radius + 1) if radius == 0 else [-radius, radius]:
                 neighbor = layer_idx + delta
                 candidates.extend(good_by_key.get((neighbor, fc_type), []))
             if candidates:

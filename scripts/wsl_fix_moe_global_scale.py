@@ -23,10 +23,14 @@ def fix() -> bool:
     modified = False
 
     replacements = [
-        ("torch.empty(num_experts, w13_num_shards, dtype=torch.float32)",
-         "torch.ones(num_experts, w13_num_shards, dtype=torch.float32)"),
-        ("torch.empty(num_experts, dtype=torch.float32), requires_grad=False\n        )\n        layer.register_parameter(\"w2_weight_global_scale\"",
-         "torch.ones(num_experts, dtype=torch.float32), requires_grad=False\n        )\n        layer.register_parameter(\"w2_weight_global_scale\""),
+        (
+            "torch.empty(num_experts, w13_num_shards, dtype=torch.float32)",
+            "torch.ones(num_experts, w13_num_shards, dtype=torch.float32)",
+        ),
+        (
+            'torch.empty(num_experts, dtype=torch.float32), requires_grad=False\n        )\n        layer.register_parameter("w2_weight_global_scale"',
+            'torch.ones(num_experts, dtype=torch.float32), requires_grad=False\n        )\n        layer.register_parameter("w2_weight_global_scale"',
+        ),
     ]
 
     # Input scales - need to find the right ones
@@ -38,8 +42,8 @@ def fix() -> bool:
 
     # Also fix input global scales
     for old in [
-        "torch.empty(num_experts, w13_num_shards, dtype=torch.float32),\n            requires_grad=False,\n        )\n        layer.register_parameter(\"w13_input_global_scale\"",
-        "torch.empty(num_experts, dtype=torch.float32), requires_grad=False\n        )\n        layer.register_parameter(\"w2_input_global_scale\"",
+        'torch.empty(num_experts, w13_num_shards, dtype=torch.float32),\n            requires_grad=False,\n        )\n        layer.register_parameter("w13_input_global_scale"',
+        'torch.empty(num_experts, dtype=torch.float32), requires_grad=False\n        )\n        layer.register_parameter("w2_input_global_scale"',
     ]:
         if old in content:
             content = content.replace(old, old.replace("torch.empty", "torch.ones"))

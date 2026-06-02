@@ -7,6 +7,7 @@ up-half scales stay at torch.empty (NaN). This produces NaN dequantized weights.
 
 Split the combined scale tensor into [:half] and [half:] and load as w1/w3.
 """
+
 from pathlib import Path
 
 ZAYA = Path("/home/ttimm/vllm-src/vllm/model_executor/models/zaya.py")
@@ -74,7 +75,7 @@ if old_w13 in c:
     print("  [OK] w13 weight_packed split already present")
 else:
     # Check alternative pattern
-    alt = 'fused_moe_module.weight_loader(\n                            param, gate_weight'
+    alt = "fused_moe_module.weight_loader(\n                            param, gate_weight"
     if alt in c:
         print("  [OK] w13 weight_packed has alternate split pattern")
     else:

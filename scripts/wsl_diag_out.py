@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Add output diagnostic to MoE apply — check if loop produces anything."""
+
 from pathlib import Path
-p = Path("/home/ttimm/vllm-src/vllm/model_executor/layers/quantization/"
-         "compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_nvfp4.py")
+
+p = Path(
+    "/home/ttimm/vllm-src/vllm/model_executor/layers/quantization/"
+    "compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_nvfp4.py"
+)
 c = p.read_text()
 
 # Add diagnostic after the per-expert loop, before return

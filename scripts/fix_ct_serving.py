@@ -1,4 +1,4 @@
-"""Professional fix for Zaya CT NVFP4 vLLM serving.
+r"""Professional fix for Zaya CT NVFP4 vLLM serving.
 
 Three root problems addressed:
   1. process_weights_after_loading blanket skip → restored with dimension guard

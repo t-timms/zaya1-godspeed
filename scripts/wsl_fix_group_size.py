@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Fix NVFP4 scheme to use configurable group_size."""
 
-
 # 1. Fix the scheme class to accept group_size
 nvfp4_path = "/home/ttimm/vllm-env/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a16_nvfp4.py"
 nvfp4 = open(nvfp4_path).read()

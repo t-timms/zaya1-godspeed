@@ -299,7 +299,6 @@ def _optimize_input_global_scales(
     with lowest fake-quant MSE on the cached calibration activations.
     """
     optimized: dict[str, float] = {}
-    fp4 = _NVFP4_LEVELS
 
     for name, max_act in activation_max.items():
         if max_act <= 0:
@@ -390,7 +389,7 @@ def _compute_soar_global_scale(
         fp8_rounded = fp8_raw.to(torch.float8_e4m3fn).to(torch.float32)
         # Weighted relative error: (Δs / s)² × block_max²
         rel_err = ((fp8_rounded - fp8_raw) / fp8_raw.clamp(min=1e-38)) ** 2
-        weighted_err = float((rel_err * bm ** 2).sum().item())
+        weighted_err = float((rel_err * bm**2).sum().item())
         if weighted_err < best_err:
             best_err = weighted_err
             best_scale = g
@@ -402,6 +401,7 @@ def _compute_soar_global_scale(
 # MR-GPTQ helpers (arXiv:2509.23202 — Micro-Rotation GPTQ)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _quantize_to_fp4_e2m1(x: torch.Tensor) -> torch.Tensor:
     """Round each element to the nearest FP4 E2M1 representable value.
 
@@ -412,13 +412,13 @@ def _quantize_to_fp4_e2m1(x: torch.Tensor) -> torch.Tensor:
     sign = x.sign()
     ax = x.abs()
     q = torch.zeros_like(ax)
-    q = torch.where(ax > 0.25,  torch.full_like(ax, 0.5), q)
-    q = torch.where(ax > 0.75,  torch.full_like(ax, 1.0), q)
-    q = torch.where(ax > 1.25,  torch.full_like(ax, 1.5), q)
-    q = torch.where(ax > 1.75,  torch.full_like(ax, 2.0), q)
-    q = torch.where(ax > 2.5,   torch.full_like(ax, 3.0), q)
-    q = torch.where(ax > 3.5,   torch.full_like(ax, 4.0), q)
-    q = torch.where(ax > 5.0,   torch.full_like(ax, 6.0), q)
+    q = torch.where(ax > 0.25, torch.full_like(ax, 0.5), q)
+    q = torch.where(ax > 0.75, torch.full_like(ax, 1.0), q)
+    q = torch.where(ax > 1.25, torch.full_like(ax, 1.5), q)
+    q = torch.where(ax > 1.75, torch.full_like(ax, 2.0), q)
+    q = torch.where(ax > 2.5, torch.full_like(ax, 3.0), q)
+    q = torch.where(ax > 3.5, torch.full_like(ax, 4.0), q)
+    q = torch.where(ax > 5.0, torch.full_like(ax, 6.0), q)
     return sign * q
 
 
@@ -482,8 +482,8 @@ def _gptq_correction(
                 continue
             if j + 1 < n_in:
                 # W[:, j+1:] -= outer(quant_err, H_inv[j, j+1:]) / H_inv[j,j]
-                W_q[:, j + 1:] = W_q[:, j + 1:] - (
-                    quant_err.unsqueeze(1) * (H_inv[j, j + 1:] / h_inv_jj).unsqueeze(0)
+                W_q[:, j + 1 :] = W_q[:, j + 1 :] - (
+                    quant_err.unsqueeze(1) * (H_inv[j, j + 1 :] / h_inv_jj).unsqueeze(0)
                 )
             W_q[:, j] = w_q_j
 
@@ -542,9 +542,9 @@ def calibrate_input_global_scales_layerwise(
     block_maxes_store: dict[str, list[torch.Tensor]] = {}  # per-block maxes for SOAR
     hessian_store: dict[str, torch.Tensor] = {}  # per-Linear X^T X for GPTQ
     sample_counts: dict[str, int] = {}
-    CACHE_SIZE = 128       # reservoir-sampled vectors per Linear (activation_cache)
+    CACHE_SIZE = 128  # reservoir-sampled vectors per Linear (activation_cache)
     BLOCK_MAXES_CAP = 64  # max block-maxes tensors per Linear (SOAR); bounded to prevent OOM
-    GROUP_SIZE = 16        # NVFP4 block size
+    GROUP_SIZE = 16  # NVFP4 block size
 
     def _cache_sample(name: str, vec: torch.Tensor) -> None:
         """Reservoir sampling: keep up to CACHE_SIZE random vectors per key."""
@@ -779,7 +779,9 @@ def calibrate_input_global_scales_layerwise(
             if gptq_applied > 0:
                 logger.debug(
                     "  GPTQ layer %d: applied to %d Linears (%d skipped — no activations)",
-                    layer_idx, gptq_applied, gptq_skipped,
+                    layer_idx,
+                    gptq_applied,
+                    gptq_skipped,
                 )
 
         layer.to("cpu")
@@ -789,6 +791,7 @@ def calibrate_input_global_scales_layerwise(
         # repeated large tensor alloc/free cycles across 80 layers).
         try:
             import ctypes
+
             ctypes.cdll.LoadLibrary("libc.so.6").malloc_trim(0)
         except Exception:
             pass
@@ -1097,14 +1100,13 @@ def run_w4a4(args: Any) -> int:
         if manifest_path.exists():
             with open(manifest_path) as _mf:
                 _manifest = json.load(_mf)
-            _manifest["activation_max_per_module"] = {
-                k: round(float(v), 4) for k, v in activation_max.items()
-            }
+            _manifest["activation_max_per_module"] = {k: round(float(v), 4) for k, v in activation_max.items()}
             with open(manifest_path, "w") as _mf:
                 json.dump(_manifest, _mf, indent=2)
             logger.info(
                 "stats-only: wrote activation_max_per_module (%d entries) to %s",
-                len(activation_max), manifest_path,
+                len(activation_max),
+                manifest_path,
             )
         else:
             logger.error("stats-only: no quantization_manifest.json in %s", output_dir)
@@ -1116,7 +1118,7 @@ def run_w4a4(args: Any) -> int:
     # ENTIRE layer's MLP. BF16 modules will be saved as raw weights in the
     # checkpoint and added to the quantization_config ignore list so vLLM routes
     # them through the standard BF16 matmul path.
-    dynamic_bf16_set: set[str] = set()   # module names exempted from W4A4
+    dynamic_bf16_set: set[str] = set()  # module names exempted from W4A4
     dynamic_outlier_layers: set[int] = set()  # layer indices driving the exemption
     threshold = getattr(args, "mixed_precision_threshold", MIXED_PRECISION_DEFAULT_THRESHOLD)
     if threshold is not None and threshold > 0:
@@ -1135,8 +1137,7 @@ def run_w4a4(args: Any) -> int:
                     dynamic_bf16_set.add(name)
 
             logger.info(
-                "Mixed precision: %d outlier layers → %d modules exempted to BF16 "
-                "(max_abs > %.1f)",
+                "Mixed precision: %d outlier layers → %d modules exempted to BF16 (max_abs > %.1f)",
                 len(dynamic_outlier_layers),
                 len(dynamic_bf16_set),
                 threshold,
@@ -1275,10 +1276,15 @@ def run_w4a4(args: Any) -> int:
     # every Linear; we strip them so BF16 layers only carry their .weight tensor.
     # This makes the checkpoint unambiguous and eliminates the need for any
     # defensive guards in vLLM's load_weights path.
-    _BF16_QUANT_SUFFIXES: frozenset[str] = frozenset({
-        "weight_scale", "weight_global_scale", "weight_zero_point",
-        "input_global_scale", "weight_packed",
-    })
+    _BF16_QUANT_SUFFIXES: frozenset[str] = frozenset(
+        {
+            "weight_scale",
+            "weight_global_scale",
+            "weight_zero_point",
+            "input_global_scale",
+            "weight_packed",
+        }
+    )
 
     for pname, param in model.named_parameters():
         module_name = ".".join(pname.split(".")[:-1])
@@ -1463,7 +1469,9 @@ def run_w4a4(args: Any) -> int:
                 f"{len(dynamic_outlier_layers)} MoE layers where max_abs > {threshold:.0f} "
                 f"kept at BF16 ({len(dynamic_bf16_set)} Linears). "
                 f"FusedMoE requires uniform quantization per layer."
-            ) if dynamic_outlier_layers else "disabled",
+            )
+            if dynamic_outlier_layers
+            else "disabled",
         },
         # Per-module activation max values from calibration — used by
         # apply_singlequant_rotations.py for calibration-based channel selection.
@@ -1979,7 +1987,6 @@ def main() -> int:
             "vram": "16 GB",
             "cuda": torch.version.cuda,
         },
-        "activation_max_per_module": {k: round(float(v), 4) for k, v in activation_max.items()},
         "modules_compressed": linear_count,
         "output_size_bytes": total_bytes,
         "dry_run": args.dry_run,

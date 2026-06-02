@@ -41,12 +41,14 @@ def _dequant_fp4_weight(weight_packed: torch.Tensor) -> torch.Tensor:
     mant_high = weight_high & 0x1
 
     weight_float_low = ((-1.0) ** sign_low.float()) * (2.0 ** (exp_low.float() - 2.0)) * (1.0 + mant_low.float() / 2.0)
-    weight_float_high = ((-1.0) ** sign_high.float()) * (2.0 ** (exp_high.float() - 2.0)) * (1.0 + mant_high.float() / 2.0)
+    weight_float_high = (
+        ((-1.0) ** sign_high.float()) * (2.0 ** (exp_high.float() - 2.0)) * (1.0 + mant_high.float() / 2.0)
+    )
 
     # Special case: exp=0, mant=0 → subnormal (0)
     # For simplicity, treat as 0 when both are zero
-    is_zero_low = (weight_low == 0)
-    is_zero_high = (weight_high == 0)
+    is_zero_low = weight_low == 0
+    is_zero_high = weight_high == 0
     weight_float_low = torch.where(is_zero_low, torch.zeros_like(weight_float_low), weight_float_low)
     weight_float_high = torch.where(is_zero_high, torch.zeros_like(weight_float_high), weight_float_high)
 
@@ -123,13 +125,13 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
 
         # Check if Marlin can handle this layer
         # Marlin requires: size_k % 128 == 0, size_n % 64 == 0
-        can_use_marlin = (input_size % 128 == 0 and output_size % 64 == 0)
+        can_use_marlin = input_size % 128 == 0 and output_size % 64 == 0
 
         if not can_use_marlin:
             logger.info_once(
-                "Skipping Marlin repack for layer (size_k=%d, size_n=%d). "
-                "Using Python FP4 dequant fallback.",
-                input_size, output_size,
+                "Skipping Marlin repack for layer (size_k=%d, size_n=%d). Using Python FP4 dequant fallback.",
+                input_size,
+                output_size,
             )
             self._use_python_dequant = True
             # Keep weight_packed as-is, no Marlin processing

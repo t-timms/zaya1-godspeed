@@ -1,6 +1,6 @@
 [project]
 name = "zaya1-godspeed"
-version = "0.3.1"
+version = "0.3.2"
 description = "Completing ZAYA1-8B with agentic multi-turn tool calling via teacher-distilled SFT+GRPO. DeepSeek V4 Pro teacher, Godspeed harness, Unsloth + TRL."
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
@@ -37,6 +37,13 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    "E501",  # line length is owned by `ruff format`; remaining long lines are URLs/strings it cannot wrap
+    "N803",  # function args may be matrix/tensor names (Q, K, V, W, R) per ML convention
+    "N806",  # local vars may be matrix/tensor names (W, Q, K, V) per ML convention
+    "N812",  # lowercase imported as non-lowercase (e.g. `functional as F`)
+    "N814",  # camelcase imported as constant-style alias
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

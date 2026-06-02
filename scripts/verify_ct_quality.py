@@ -7,8 +7,8 @@ import os
 import sys
 from collections import Counter
 
-import torch
 import safetensors.torch as st
+import torch
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("qcheck")
@@ -64,12 +64,18 @@ def main() -> int:
     comp_state = {k: d[k] for k in d}
     decomp = NVFP4PackedCompressor.decompress(comp_state, scheme)
     deq = decomp["weight"]
-    log.info("Packed: %s → Deq: %s (via NVFP4PackedCompressor.decompress)", list(d["weight_packed"].shape), list(deq.shape))
+    log.info(
+        "Packed: %s → Deq: %s (via NVFP4PackedCompressor.decompress)", list(d["weight_packed"].shape), list(deq.shape)
+    )
 
     from transformers import AutoModelForCausalLM
+
     log.info("Loading original BF16...")
     orig = AutoModelForCausalLM.from_pretrained(
-        "Zyphra/ZAYA1-8B", torch_dtype=torch.bfloat16, device_map="cpu", trust_remote_code=True,
+        "Zyphra/ZAYA1-8B",
+        torch_dtype=torch.bfloat16,
+        device_map="cpu",
+        trust_remote_code=True,
     )
     orig_w = orig.lm_head.weight.data
     error = (deq.to("cpu") - orig_w).abs().mean().item()

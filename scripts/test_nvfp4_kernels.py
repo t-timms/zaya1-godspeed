@@ -1,6 +1,9 @@
 """Verify NVFP4 SM120 kernels are compiled and accessible."""
+
 import sys
+
 import torch
+
 sys.path.insert(0, "/home/ttimm/vllm-src")
 
 from vllm import _C_stable_libtorch

@@ -18,6 +18,7 @@ Usage:
       --n-outlier-channels 32 \\
       --output-checkpoint ./zaya1-8b-nvfp4-w4a4-arc
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,16 +33,16 @@ import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
-                    datefmt="%H:%M:%S")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
 # ── Constants ───────────────────────────────────────────────────────────────
 HIDDEN_DIM = 2048
-MAX_BF16_LAYERS_IN_VRAM = 2   # process this many BF16 layers simultaneously
+MAX_BF16_LAYERS_IN_VRAM = 2  # process this many BF16 layers simultaneously
 
 
 # ── Weight loading helpers ───────────────────────────────────────────────────
+
 
 def _load_safetensors_index(checkpoint_dir: Path) -> dict[str, str]:
     """Return {tensor_name: shard_filename} from model.safetensors.index.json."""
@@ -81,6 +82,7 @@ def _load_layer_weights(
 
 # ── Simple BF16 MLP forward (for outlier layers) ────────────────────────────
 
+
 def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     variance = x.float().pow(2).mean(-1, keepdim=True)
     return (x * torch.rsqrt(variance + eps)).to(weight.dtype) * weight
@@ -94,19 +96,19 @@ def _swiglu(gate_up: torch.Tensor) -> torch.Tensor:
 
 
 def _bf16_moe_forward_single_expert(
-    hidden: torch.Tensor,         # [tokens_for_expert, hidden_dim] BF16
-    fc1_weight: torch.Tensor,     # [ffn_dim*2, hidden_dim] BF16  (gate+up combined)
-    fc2_weight: torch.Tensor,     # [hidden_dim, ffn_dim] BF16
+    hidden: torch.Tensor,  # [tokens_for_expert, hidden_dim] BF16
+    fc1_weight: torch.Tensor,  # [ffn_dim*2, hidden_dim] BF16  (gate+up combined)
+    fc2_weight: torch.Tensor,  # [hidden_dim, ffn_dim] BF16
 ) -> torch.Tensor:
     """Single-expert SwiGLU MLP forward, returns [tokens_for_expert, hidden_dim]."""
-    gate_up = hidden.float() @ fc1_weight.float().T    # [T, 2*ffn]
-    x = _swiglu(torch.tensor(gate_up, dtype=torch.bfloat16))   # [T, ffn]
-    out = x.float() @ fc2_weight.float().T              # [T, hidden]
+    gate_up = hidden.float() @ fc1_weight.float().T  # [T, 2*ffn]
+    x = _swiglu(torch.tensor(gate_up, dtype=torch.bfloat16))  # [T, ffn]
+    out = x.float() @ fc2_weight.float().T  # [T, hidden]
     return torch.tensor(out, dtype=torch.bfloat16)
 
 
 def _bf16_layer_forward(
-    hidden_states: torch.Tensor,          # [n_tokens, hidden_dim]
+    hidden_states: torch.Tensor,  # [n_tokens, hidden_dim]
     layer_weights: dict[str, torch.Tensor],
     layer_idx: int,
     router_weights: dict[str, torch.Tensor],
@@ -172,31 +174,30 @@ def _bf16_layer_forward(
 
 # ── W4A4 approximate forward ─────────────────────────────────────────────────
 
+
 def _unpack_nvfp4_weight(
-    weight_packed: torch.Tensor,   # uint8 [out, in//2]
-    weight_scale: torch.Tensor,    # float8_e4m3fn [out, in//16]
+    weight_packed: torch.Tensor,  # uint8 [out, in//2]
+    weight_scale: torch.Tensor,  # float8_e4m3fn [out, in//16]
     weight_global_scale: torch.Tensor,  # float32 scalar
     out_features: int,
     in_features: int,
 ) -> torch.Tensor:
     """Dequantize NVFP4 packed weights to BF16. Returns [out, in]."""
     # FP4 E2M1 representable values (positive side)
-    FP4_VALUES = torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
-    )
+    FP4_VALUES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 
     wp = weight_packed.to(torch.int32)
-    lo = wp & 0x0F                    # [out, in//2] low nibble
-    hi = (wp >> 4) & 0x0F            # [out, in//2] high nibble
+    lo = wp & 0x0F  # [out, in//2] low nibble
+    hi = (wp >> 4) & 0x0F  # [out, in//2] high nibble
 
     def nibble_to_fp4(nibble: torch.Tensor) -> torch.Tensor:
-        sign = (nibble >> 3).float() * (-2) + 1   # 1 if bit3=0, -1 if bit3=1
+        sign = (nibble >> 3).float() * (-2) + 1  # 1 if bit3=0, -1 if bit3=1
         mag_idx = nibble & 0x07
         mag = FP4_VALUES[mag_idx.flatten()].reshape(mag_idx.shape)
         return sign * mag
 
-    lo_f = nibble_to_fp4(lo)   # [out, in//2]
-    hi_f = nibble_to_fp4(hi)   # [out, in//2]
+    lo_f = nibble_to_fp4(lo)  # [out, in//2]
+    hi_f = nibble_to_fp4(hi)  # [out, in//2]
 
     # Interleave: even positions = lo nibble, odd = hi nibble
     W_fp4 = torch.zeros(out_features, in_features, dtype=torch.float32)
@@ -204,10 +205,10 @@ def _unpack_nvfp4_weight(
     W_fp4[:, 1::2] = hi_f
 
     # Apply per-group FP8 scale
-    ws = weight_scale.to(torch.float32)   # [out, in//16]
+    ws = weight_scale.to(torch.float32)  # [out, in//16]
     gs = float(weight_global_scale.item())
     # scale_real = ws / gs  (gs = 2688/max_abs, stored as divisor)
-    ws_real = ws / gs                      # [out, in//16]
+    ws_real = ws / gs  # [out, in//16]
     ws_expanded = ws_real.repeat_interleave(16, dim=1)[:, :in_features]  # [out, in]
     W_dq = W_fp4 * ws_expanded
 
@@ -215,7 +216,7 @@ def _unpack_nvfp4_weight(
 
 
 def _w4a4_moe_forward_single_expert(
-    hidden: torch.Tensor,           # [t, hidden_dim]
+    hidden: torch.Tensor,  # [t, hidden_dim]
     layer_weights: dict[str, torch.Tensor],
     layer_idx: int,
     exp_id: int,
@@ -240,10 +241,11 @@ def _w4a4_moe_forward_single_expert(
 
 # ── Residual fitting ─────────────────────────────────────────────────────────
 
+
 def _fit_arc_correction(
-    x_in: torch.Tensor,       # [N, hidden_dim] - ZayaBlock input activations
-    y_ref: torch.Tensor,      # [N, hidden_dim] - BF16 MoE output
-    y_w4a4: torch.Tensor,     # [N, hidden_dim] - W4A4 MoE output
+    x_in: torch.Tensor,  # [N, hidden_dim] - ZayaBlock input activations
+    y_ref: torch.Tensor,  # [N, hidden_dim] - BF16 MoE output
+    y_w4a4: torch.Tensor,  # [N, hidden_dim] - W4A4 MoE output
     n_outlier_channels: int,
     device: str = "cpu",
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -253,24 +255,24 @@ def _fit_arc_correction(
         arc_outlier_channels: int64 [n_outlier_ch] — indices of selected input channels
         arc_residual_weight: bfloat16 [n_outlier_ch, hidden_dim]
     """
-    residual = (y_ref - y_w4a4).float()      # [N, hidden]
+    residual = (y_ref - y_w4a4).float()  # [N, hidden]
 
     # Select channels by max-abs activation
     ch_maxabs = x_in.float().abs().amax(dim=0)  # [hidden_dim]
     n_outlier_channels = min(n_outlier_channels, ch_maxabs.numel())
     outlier_channels = ch_maxabs.topk(n_outlier_channels).indices.sort().values  # sorted
 
-    X = x_in[:, outlier_channels].float().to(device)   # [N, n_ch]
-    R = residual.to(device)                              # [N, hidden]
+    X = x_in[:, outlier_channels].float().to(device)  # [N, n_ch]
+    R = residual.to(device)  # [N, hidden]
 
     N, n_ch = X.shape
 
     # Ridge least-squares: arc_w = (X^T X + λI)^{-1} X^T R
     # λ = 1e-4 * mean(diag(X^T X)) for numerical stability
-    XtX = X.T @ X                             # [n_ch, n_ch]
+    XtX = X.T @ X  # [n_ch, n_ch]
     lam = 1e-4 * XtX.diagonal().mean().clamp(min=1e-6)
     XtX.diagonal().add_(lam)
-    XtR = X.T @ R                             # [n_ch, hidden]
+    XtR = X.T @ R  # [n_ch, hidden]
     try:
         arc_w = torch.linalg.solve(XtX, XtR)  # [n_ch, hidden]
     except (torch.linalg.LinAlgError, RuntimeError):
@@ -281,7 +283,8 @@ def _fit_arc_correction(
     residual_after = (R - X @ arc_w).norm(dim=-1).mean().item()
     logger.info(
         "    Residual norm: %.4f → %.4f (%.1f%% reduction)",
-        residual_before, residual_after,
+        residual_before,
+        residual_after,
         100.0 * (residual_before - residual_after) / max(residual_before, 1e-9),
     )
 
@@ -293,21 +296,35 @@ def _fit_arc_correction(
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--w4a4-checkpoint", required=True,
-                        help="Path to W4A4 SOAR checkpoint dir (contains quantization_manifest.json)")
-    parser.add_argument("--bf16-model", default="Zyphra/ZAYA1-8B",
-                        help="BF16 reference model (HF hub ID or local path)")
-    parser.add_argument("--calibration", default="data/calibration/arcmix/calibration_data.pt",
-                        help="Calibration tensor path (same as used for W4A4 quantization)")
-    parser.add_argument("--n-outlier-channels", type=int, default=32,
-                        help="Number of input channels to use for residual correction per layer")
-    parser.add_argument("--output-checkpoint", required=True,
-                        help="Output checkpoint dir (copy of W4A4 + arc correction tensors)")
+    parser.add_argument(
+        "--w4a4-checkpoint",
+        required=True,
+        help="Path to W4A4 SOAR checkpoint dir (contains quantization_manifest.json)",
+    )
+    parser.add_argument(
+        "--bf16-model", default="Zyphra/ZAYA1-8B", help="BF16 reference model (HF hub ID or local path)"
+    )
+    parser.add_argument(
+        "--calibration",
+        default="data/calibration/arcmix/calibration_data.pt",
+        help="Calibration tensor path (same as used for W4A4 quantization)",
+    )
+    parser.add_argument(
+        "--n-outlier-channels",
+        type=int,
+        default=32,
+        help="Number of input channels to use for residual correction per layer",
+    )
+    parser.add_argument(
+        "--output-checkpoint", required=True, help="Output checkpoint dir (copy of W4A4 + arc correction tensors)"
+    )
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--max-samples", type=int, default=256,
-                        help="Max calibration samples to use for fitting (fewer = faster)")
+    parser.add_argument(
+        "--max-samples", type=int, default=256, help="Max calibration samples to use for fitting (fewer = faster)"
+    )
     args = parser.parse_args()
 
     device = args.device
@@ -354,11 +371,11 @@ def main() -> None:
         # Try HuggingFace cache
         try:
             from huggingface_hub import snapshot_download
+
             bf16_dir = Path(snapshot_download(args.bf16_model))
         except Exception as e:
             raise RuntimeError(
-                f"BF16 model not found locally at {args.bf16_model} and "
-                f"huggingface_hub download failed: {e}"
+                f"BF16 model not found locally at {args.bf16_model} and huggingface_hub download failed: {e}"
             )
     bf16_weight_map = _load_safetensors_index(bf16_dir)
     logger.info("BF16 model found at %s", bf16_dir)
@@ -393,8 +410,10 @@ def main() -> None:
 
     try:
         import sys
+
         sys.path.insert(0, "/home/ttimm/vllm-src")
         import vllm  # noqa: F401
+
         use_vllm = True
         logger.info("vLLM available — using hook-based activation collection")
     except ImportError:
@@ -477,6 +496,7 @@ def _collect_via_vllm(
 ) -> dict[int, dict[str, Any]]:
     """Use vLLM to run both W4A4 and BF16 models and collect ZayaBlock I/O."""
     import sys
+
     sys.path.insert(0, "/home/ttimm/vllm-src")
     import torch
     from vllm import LLM, SamplingParams  # noqa: F401
@@ -506,6 +526,7 @@ def _collect_via_vllm(
 
     def _attach_w4a4_hooks(model: torch.nn.Module) -> int:
         from vllm.model_executor.models.zaya import ZayaBlock
+
         count = 0
         for name, module in model.named_modules():
             if not isinstance(module, ZayaBlock):
@@ -522,8 +543,10 @@ def _collect_via_vllm(
             def make_hooks(ln: int):
                 def pre_hook(mod, inp):
                     w4a4_inputs[ln].append(inp[0].detach().cpu())
+
                 def post_hook(mod, inp, out):
                     w4a4_outputs[ln].append(out[0].detach().cpu())
+
                 return pre_hook, post_hook
 
             pre_h, post_h = make_hooks(layer_n)
@@ -564,6 +587,7 @@ def _collect_via_vllm(
 
     def _attach_bf16_hooks(model: torch.nn.Module) -> int:
         from vllm.model_executor.models.zaya import ZayaBlock
+
         count = 0
         for name, module in model.named_modules():
             if not isinstance(module, ZayaBlock):
@@ -580,6 +604,7 @@ def _collect_via_vllm(
             def make_post_hook(ln: int):
                 def post_hook(mod, inp, out):
                     bf16_outputs[ln].append(out[0].detach().cpu())
+
                 return post_hook
 
             hook_handles_bf16.append(module.register_forward_hook(make_post_hook(layer_n)))
@@ -678,7 +703,7 @@ def _collect_standalone(
         # Process in chunks for memory efficiency
         chunk = 512
         for start in range(0, hidden_states.shape[0], chunk):
-            h_chunk = hidden_states[start:start + chunk]
+            h_chunk = hidden_states[start : start + chunk]
             x_in_list.append(h_chunk.cpu())
 
             # BF16 forward
@@ -686,11 +711,17 @@ def _collect_standalone(
             y_bf16_list.append(y_bf16.cpu())
 
             # W4A4 forward (dequantized approximation)
-            logits = h_chunk.float() @ router_weights.get(
-                f"model.layers.{layer_idx}.zaya_block.router.dense_h_to_4h.weight",
-                torch.zeros(64, HIDDEN_DIM)
-            ).float().T
-            expert_ids = logits.argmax(dim=-1) if logits.shape[-1] > 1 else torch.zeros(h_chunk.shape[0], dtype=torch.long)
+            logits = (
+                h_chunk.float()
+                @ router_weights.get(
+                    f"model.layers.{layer_idx}.zaya_block.router.dense_h_to_4h.weight", torch.zeros(64, HIDDEN_DIM)
+                )
+                .float()
+                .T
+            )
+            expert_ids = (
+                logits.argmax(dim=-1) if logits.shape[-1] > 1 else torch.zeros(h_chunk.shape[0], dtype=torch.long)
+            )
             n_experts_layer = max(expert_ids.max().item() + 1, 1)
             y_w4a4_chunk = torch.zeros_like(h_chunk)
             for exp_id in range(int(n_experts_layer)):

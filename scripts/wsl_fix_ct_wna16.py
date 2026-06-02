@@ -1,4 +1,5 @@
 """Handle None kernel (unsupported small layers) in CT WNA16 create_weights"""
+
 p = "/root/vllm-ct-env/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
 with open(p) as f:
     c = f.read()

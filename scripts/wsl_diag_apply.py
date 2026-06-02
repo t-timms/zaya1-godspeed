@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Add one-shot diagnostic to MoE apply for debugging all-zero output."""
+
 from pathlib import Path
 
-p = Path("/home/ttimm/vllm-src/vllm/model_executor/layers/quantization/"
-         "compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_nvfp4.py")
+p = Path(
+    "/home/ttimm/vllm-src/vllm/model_executor/layers/quantization/"
+    "compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_nvfp4.py"
+)
 c = p.read_text()
 
 # Add diagnostic after dequant calls in apply()

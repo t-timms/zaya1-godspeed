@@ -1,4 +1,5 @@
 """Direct fix: skip process_weights_after_loading for modules without weight_packed"""
+
 p = "/root/vllm-ct-env/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py"
 with open(p) as f:
     c = f.read()

@@ -4,9 +4,9 @@ with open(p) as f:
 
 # Fix _is_static_tensor_w8a8 to handle weight-only quantization (input_quant=None)
 old = "def _is_static_tensor_w8a8(self, weight_quant, input_quant):"
-new = '''def _is_static_tensor_w8a8(self, weight_quant, input_quant):
+new = """def _is_static_tensor_w8a8(self, weight_quant, input_quant):
         if input_quant is None:
-            return False  # weight-only quantization'''
+            return False  # weight-only quantization"""
 c = c.replace(old, new)
 
 with open(p, "w") as f:

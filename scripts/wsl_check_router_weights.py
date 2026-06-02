@@ -13,7 +13,7 @@ for k in sorted(router_keys)[:10]:
 print(f"\nTotal weight keys: {len(idx['weight_map'])}")
 
 # Check specific router Linear weights vs regular Linear weights
-from safetensors import safe_open
+from safetensors import safe_open  # noqa: E402
 
 with safe_open(
     "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-ct/model.safetensors", framework="pt"

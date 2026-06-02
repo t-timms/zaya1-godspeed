@@ -64,14 +64,14 @@ MANIFEST_FILE = OUTPUT_DIR / "manifest.json"
 # replaced with GSM8K (8K math word problems). Split humaneval 10% -> humaneval 5%
 # + mbpp 5% for code diversity. Math weight 30% preserved, code 10% preserved.
 SOURCE_WEIGHTS_PHASE1: dict[str, float] = {
-    "math500":       0.15,  # MATH-500 (competition-style math reasoning)
-    "gsm8k":         0.15,  # GSM8K (multi-step math word problems)
-    "humaneval":     0.05,  # Python function-completion code
-    "mbpp":          0.05,  # Mostly Basic Python Problems
-    "triviaqa":      0.15,  # knowledge QA
-    "alpaca":        0.15,  # instruction-following
-    "writingprompts": 0.15, # creative style
-    "glaive":        0.15,  # tool-use traces (agentic)
+    "math500": 0.15,  # MATH-500 (competition-style math reasoning)
+    "gsm8k": 0.15,  # GSM8K (multi-step math word problems)
+    "humaneval": 0.05,  # Python function-completion code
+    "mbpp": 0.05,  # Mostly Basic Python Problems
+    "triviaqa": 0.15,  # knowledge QA
+    "alpaca": 0.15,  # instruction-following
+    "writingprompts": 0.15,  # creative style
+    "glaive": 0.15,  # tool-use traces (agentic)
 }
 
 # Phase 2 mix: ARC-aware calibration. Adds commonsense reasoning data
@@ -81,26 +81,26 @@ SOURCE_WEIGHTS_PHASE1: dict[str, float] = {
 # Math reduced to 20% (still dominant), creative/agentic reduced to make room.
 # v1 (2026-05-19): targeting ARC-Easy/Challenge + HellaSwag accuracy recovery.
 SOURCE_WEIGHTS_PHASE2: dict[str, float] = {
-    "math500":        0.10,  # MATH-500
-    "gsm8k":          0.10,  # GSM8K
-    "humaneval":      0.05,  # Python code
-    "mbpp":           0.05,  # Python code
-    "triviaqa":       0.10,  # knowledge QA
-    "alpaca":         0.10,  # instruction-following
+    "math500": 0.10,  # MATH-500
+    "gsm8k": 0.10,  # GSM8K
+    "humaneval": 0.05,  # Python code
+    "mbpp": 0.05,  # Python code
+    "triviaqa": 0.10,  # knowledge QA
+    "alpaca": 0.10,  # instruction-following
     "writingprompts": 0.05,  # creative style (reduced)
-    "glaive":         0.05,  # tool-use (reduced)
-    "arc_easy":       0.15,  # ARC-Easy training split (commonsense QA)
-    "arc_challenge":  0.10,  # ARC-Challenge training split (harder QA)
-    "hellaswag":      0.15,  # HellaSwag training split (activity completion)
+    "glaive": 0.05,  # tool-use (reduced)
+    "arc_easy": 0.15,  # ARC-Easy training split (commonsense QA)
+    "arc_challenge": 0.10,  # ARC-Challenge training split (harder QA)
+    "hellaswag": 0.15,  # HellaSwag training split (activity completion)
 }
 
 # Legacy mix retained for --legacy-mix flag (reproducibility of the original
 # Stage 1 W4A16 calibration that produced zaya1-8b-nvfp4-ct-gs16).
 SOURCE_WEIGHTS_LEGACY: dict[str, float] = {
-    "math500":   0.25,
+    "math500": 0.25,
     "humaneval": 0.25,
-    "sharegpt":  0.25,
-    "aime":      0.25,
+    "sharegpt": 0.25,
+    "aime": 0.25,
 }
 
 # Default active mix (overridden to legacy when --legacy-mix passed).
@@ -108,19 +108,19 @@ SOURCE_WEIGHTS: dict[str, float] = SOURCE_WEIGHTS_PHASE1
 
 # HuggingFace dataset paths (all open-license, public train/dev splits)
 DATASET_PATHS: dict[str, str] = {
-    "math500":        "HuggingFaceH4/MATH-500",
-    "humaneval":      "openai/openai_humaneval",
-    "mbpp":           "google-research-datasets/mbpp",   # split 'train'
-    "sharegpt":       "anon8231489123/ShareGPT_Vicuna_unfiltered",
-    "aime":           "Maxwell-Jia/AIME_2024",
-    "gsm8k":          "openai/gsm8k",                    # subset 'main', split 'train' (~7.5K problems)
-    "triviaqa":       "trivia_qa",                       # subset 'rc.nocontext', split 'train'
-    "alpaca":         "yahma/alpaca-cleaned",            # split 'train'
-    "writingprompts": "euclaise/writingprompts",         # split 'train' (subsample heavily — 1.4M total)
-    "glaive":         "glaiveai/glaive-function-calling-v2",  # split 'train'
-    "arc_easy":       "allenai/ai2_arc",                 # subset 'ARC-Easy', split 'train' (2251 examples)
-    "arc_challenge":  "allenai/ai2_arc",                 # subset 'ARC-Challenge', split 'train' (1119 examples)
-    "hellaswag":      "Rowan/hellaswag",                 # split 'train' (39905 examples)
+    "math500": "HuggingFaceH4/MATH-500",
+    "humaneval": "openai/openai_humaneval",
+    "mbpp": "google-research-datasets/mbpp",  # split 'train'
+    "sharegpt": "anon8231489123/ShareGPT_Vicuna_unfiltered",
+    "aime": "Maxwell-Jia/AIME_2024",
+    "gsm8k": "openai/gsm8k",  # subset 'main', split 'train' (~7.5K problems)
+    "triviaqa": "trivia_qa",  # subset 'rc.nocontext', split 'train'
+    "alpaca": "yahma/alpaca-cleaned",  # split 'train'
+    "writingprompts": "euclaise/writingprompts",  # split 'train' (subsample heavily — 1.4M total)
+    "glaive": "glaiveai/glaive-function-calling-v2",  # split 'train'
+    "arc_easy": "allenai/ai2_arc",  # subset 'ARC-Easy', split 'train' (2251 examples)
+    "arc_challenge": "allenai/ai2_arc",  # subset 'ARC-Challenge', split 'train' (1119 examples)
+    "hellaswag": "Rowan/hellaswag",  # split 'train' (39905 examples)
 }
 
 
@@ -406,12 +406,8 @@ def load_arc_easy(datasets: Any) -> list[str]:
                 continue
             choice_texts = choices.get("text", []) if isinstance(choices, dict) else []
             choice_labels = choices.get("label", []) if isinstance(choices, dict) else []
-            formatted_choices = "\n".join(
-                f"  {lbl}. {txt}" for lbl, txt in zip(choice_labels, choice_texts)
-            )
-            texts.append(
-                f"Question: {question}\n\nChoices:\n{formatted_choices}\n\nAnswer: {answer_key}"
-            )
+            formatted_choices = "\n".join(f"  {lbl}. {txt}" for lbl, txt in zip(choice_labels, choice_texts))
+            texts.append(f"Question: {question}\n\nChoices:\n{formatted_choices}\n\nAnswer: {answer_key}")
         return texts
     except Exception as e:
         logger.warning("ARC-Easy load failed: %s", e)
@@ -432,12 +428,8 @@ def load_arc_challenge(datasets: Any) -> list[str]:
                 continue
             choice_texts = choices.get("text", []) if isinstance(choices, dict) else []
             choice_labels = choices.get("label", []) if isinstance(choices, dict) else []
-            formatted_choices = "\n".join(
-                f"  {lbl}. {txt}" for lbl, txt in zip(choice_labels, choice_texts)
-            )
-            texts.append(
-                f"Question: {question}\n\nChoices:\n{formatted_choices}\n\nAnswer: {answer_key}"
-            )
+            formatted_choices = "\n".join(f"  {lbl}. {txt}" for lbl, txt in zip(choice_labels, choice_texts))
+            texts.append(f"Question: {question}\n\nChoices:\n{formatted_choices}\n\nAnswer: {answer_key}")
         return texts
     except Exception as e:
         logger.warning("ARC-Challenge load failed: %s", e)
@@ -577,6 +569,7 @@ def build_calibration(
 
         # Deterministic shuffle so chunks aren't biased toward dataset ordering.
         import random
+
         rng = random.Random(42)
         indices = list(range(len(texts)))
         rng.shuffle(indices)
@@ -589,7 +582,10 @@ def build_calibration(
         if len(chunks) < target_chunks:
             logger.warning(
                 "  %s: %d/%d chunks (short by %d — source text exhausted)",
-                source_name, len(chunks), target_chunks, target_chunks - len(chunks),
+                source_name,
+                len(chunks),
+                target_chunks,
+                target_chunks - len(chunks),
             )
         else:
             logger.info("  %s: %d chunks", source_name, len(chunks))
@@ -602,7 +598,8 @@ def build_calibration(
         logger.warning(
             "Total chunks %d < target %d. Proceeding with available data; "
             "recipe proportions preserved (no filler duplication).",
-            len(all_chunks), num_samples,
+            len(all_chunks),
+            num_samples,
         )
 
     # Cap at requested count (shouldn't trip unless one source over-packs).
@@ -613,7 +610,10 @@ def build_calibration(
     elapsed = time.time() - t0
     logger.info(
         "Built %d chunks of %d tokens in %.1fs (%.1f chunks/s)",
-        len(all_chunks), max_length, elapsed, len(all_chunks) / max(elapsed, 0.001),
+        len(all_chunks),
+        max_length,
+        elapsed,
+        len(all_chunks) / max(elapsed, 0.001),
     )
 
     # Source breakdown reflects ACTUAL counts (after any short-source truncation).
@@ -681,7 +681,7 @@ def main() -> int:
         "--legacy-mix",
         action="store_true",
         help="Use the original 4-source 25/25/25/25 mix (MATH-500, HumanEval, ShareGPT, AIME). "
-             "Default is the Phase 1 7-source benchmark-weighted mix.",
+        "Default is the Phase 1 7-source benchmark-weighted mix.",
     )
     parser.add_argument(
         "--arc-mix",

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Run session 2 fix script against vllm-src (editable install)."""
+
 import sys
+
 sys.path.insert(0, "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/scripts")
 
 # Monkey-patch the VLLM path before importing
-import wsl_fix_nvfp4_text_gen as fix
 import pathlib
+
+import wsl_fix_nvfp4_text_gen as fix
+
 fix.VLLM = pathlib.Path("/home/ttimm/vllm-src/vllm")
 fix.ZAYA = fix.VLLM / "model_executor/models/zaya.py"
 fix.MOE = (

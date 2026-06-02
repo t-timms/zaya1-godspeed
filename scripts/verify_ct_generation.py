@@ -6,8 +6,8 @@ import logging
 import sys
 import time
 
-import torch
 import safetensors.torch as st
+import torch
 from compressed_tensors.compressors.nvfp4.base import NVFP4PackedCompressor
 from compressed_tensors.quantization import preset_name_to_scheme
 
@@ -24,7 +24,10 @@ def main() -> int:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     orig = AutoModelForCausalLM.from_pretrained(
-        "Zyphra/ZAYA1-8B", torch_dtype=torch.bfloat16, device_map="cpu", trust_remote_code=True,
+        "Zyphra/ZAYA1-8B",
+        torch_dtype=torch.bfloat16,
+        device_map="cpu",
+        trust_remote_code=True,
     )
     tok = AutoTokenizer.from_pretrained("Zyphra/ZAYA1-8B", trust_remote_code=True)
 
@@ -75,21 +78,29 @@ def main() -> int:
         ).to("cuda:0")
 
         with torch.no_grad():
-            out = orig.generate(inp, max_new_tokens=150, do_sample=False,
-                               eos_token_id=tok.eos_token_id, pad_token_id=tok.pad_token_id)
-        text = tok.decode(out[0][inp.shape[-1]:], skip_special_tokens=False)
+            out = orig.generate(
+                inp, max_new_tokens=150, do_sample=False, eos_token_id=tok.eos_token_id, pad_token_id=tok.pad_token_id
+            )
+        text = tok.decode(out[0][inp.shape[-1] :], skip_special_tokens=False)
 
         has_think = "</think>" in text
         has_im_end = "<|im_end|>" in text
         coherent = len(text.strip()) > 40
         ok = coherent and has_think and has_im_end
 
-        log.info("[%d/%d] %s | think=%s im_end=%s len=%d",
-                 i + 1, len(prompts), "PASS" if ok else "FAIL",
-                 has_think, has_im_end, len(text.strip()))
+        log.info(
+            "[%d/%d] %s | think=%s im_end=%s len=%d",
+            i + 1,
+            len(prompts),
+            "PASS" if ok else "FAIL",
+            has_think,
+            has_im_end,
+            len(text.strip()),
+        )
         log.info("  %s", text[:300].replace("\n", " "))
 
-    del orig; torch.cuda.empty_cache()
+    del orig
+    torch.cuda.empty_cache()
     log.info("=" * 60)
     log.info("NVFP4 model generation test: DONE")
     return 0

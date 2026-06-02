@@ -1,4 +1,5 @@
 """Fix ZayaForCausalLM registration format."""
+
 path = "/home/ttimm/vllm-src/vllm/model_executor/models/registry.py"
 
 with open(path) as f:

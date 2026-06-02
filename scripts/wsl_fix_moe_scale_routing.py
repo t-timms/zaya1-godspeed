@@ -12,10 +12,7 @@ and route to w13_weight_scale / w2_weight_scale respectively.
 
 from pathlib import Path
 
-ZAYA_PY = Path(
-    "/home/ttimm/vllm-env/lib/python3.12/site-packages/"
-    "vllm/model_executor/models/zaya.py"
-)
+ZAYA_PY = Path("/home/ttimm/vllm-env/lib/python3.12/site-packages/vllm/model_executor/models/zaya.py")
 
 
 def fix() -> bool:
@@ -28,40 +25,40 @@ def fix() -> bool:
     old_fc1 = (
         '                if parts[-2] == "linear_fc1":\n'
         '                    param_name = f"{fused_moe_prefix}.w13_weight"\n'
-        '                    param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                    param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        param_name = f"{fused_moe_prefix}.w13_weight_packed"\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        param_name = param_name.replace(".zaya_block.", ".mlp.zaya_block.")\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        raise KeyError(f"FusedMoE w13 param not found for {fused_moe_prefix}")\n'
     )
     new_fc1 = (
         '                if parts[-2] == "linear_fc1":\n'
         '                    if "weight_scale" in chkpt_weight_name:\n'
         '                        param_name = f"{fused_moe_prefix}.w13_weight_scale"\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                        if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                        if param is None:\n"
         '                            param_name = param_name.replace(".zaya_block.", ".mlp.zaya_block.")\n'
-        '                            param = params_dict.get(param_name)\n'
-        '                        if param is None:\n'
+        "                            param = params_dict.get(param_name)\n"
+        "                        if param is None:\n"
         '                            raise KeyError(f"FusedMoE w13_weight_scale not found for {fused_moe_prefix}")\n'
-        '                        fused_moe_module.weight_loader(\n'
+        "                        fused_moe_module.weight_loader(\n"
         '                            param, loaded_weight, chkpt_weight_name, "w1", expert_id\n'
-        '                        )\n'
-        '                        loaded_params.add(param_name)\n'
-        '                        continue\n'
+        "                        )\n"
+        "                        loaded_params.add(param_name)\n"
+        "                        continue\n"
         '                    param_name = f"{fused_moe_prefix}.w13_weight"\n'
-        '                    param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                    param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        param_name = f"{fused_moe_prefix}.w13_weight_packed"\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        param_name = param_name.replace(".zaya_block.", ".mlp.zaya_block.")\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        raise KeyError(f"FusedMoE w13 param not found for {fused_moe_prefix}")\n'
     )
 
@@ -82,40 +79,40 @@ def fix() -> bool:
     old_fc2 = (
         '                elif parts[-2] == "linear_fc2":\n'
         '                    param_name = f"{fused_moe_prefix}.w2_weight"\n'
-        '                    param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                    param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        param_name = f"{fused_moe_prefix}.w2_weight_packed"\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        param_name = param_name.replace(".zaya_block.", ".mlp.zaya_block.")\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        raise KeyError(f"FusedMoE w2 param not found for {fused_moe_prefix}")\n'
     )
     new_fc2 = (
         '                elif parts[-2] == "linear_fc2":\n'
         '                    if "weight_scale" in chkpt_weight_name:\n'
         '                        param_name = f"{fused_moe_prefix}.w2_weight_scale"\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                        if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                        if param is None:\n"
         '                            param_name = param_name.replace(".zaya_block.", ".mlp.zaya_block.")\n'
-        '                            param = params_dict.get(param_name)\n'
-        '                        if param is None:\n'
+        "                            param = params_dict.get(param_name)\n"
+        "                        if param is None:\n"
         '                            raise KeyError(f"FusedMoE w2_weight_scale not found for {fused_moe_prefix}")\n'
-        '                        fused_moe_module.weight_loader(\n'
+        "                        fused_moe_module.weight_loader(\n"
         '                            param, loaded_weight, chkpt_weight_name, "w2", expert_id\n'
-        '                        )\n'
-        '                        loaded_params.add(param_name)\n'
-        '                        continue\n'
+        "                        )\n"
+        "                        loaded_params.add(param_name)\n"
+        "                        continue\n"
         '                    param_name = f"{fused_moe_prefix}.w2_weight"\n'
-        '                    param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                    param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        param_name = f"{fused_moe_prefix}.w2_weight_packed"\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        param_name = param_name.replace(".zaya_block.", ".mlp.zaya_block.")\n'
-        '                        param = params_dict.get(param_name)\n'
-        '                    if param is None:\n'
+        "                        param = params_dict.get(param_name)\n"
+        "                    if param is None:\n"
         '                        raise KeyError(f"FusedMoE w2 param not found for {fused_moe_prefix}")\n'
     )
 

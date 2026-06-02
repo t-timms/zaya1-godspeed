@@ -4,7 +4,7 @@ import re
 p = "/root/vllm-ct-env/lib/python3.12/site-packages/vllm/model_executor/models/zaya.py"
 with open(p) as f:
     c = f.read()
-c = re.sub(r'\s*logger\.warning\("DEBUG.*?".*?\n', '', c)
+c = re.sub(r'\s*logger\.warning\("DEBUG.*?".*?\n', "", c)
 with open(p, "w") as f:
     f.write(c)
 
@@ -23,7 +23,7 @@ if old in c2:
     if "from vllm.model_executor.layers.linear import UnquantizedLinearMethod" not in c2:
         c2 = c2.replace(
             "from vllm.model_executor.layers.quantization.compressed_tensors.schemes",
-            "from vllm.model_executor.layers.linear import UnquantizedLinearMethod\nfrom vllm.model_executor.layers.quantization.compressed_tensors.schemes"
+            "from vllm.model_executor.layers.linear import UnquantizedLinearMethod\nfrom vllm.model_executor.layers.quantization.compressed_tensors.schemes",
         )
     with open(p2, "w") as f:
         f.write(c2)

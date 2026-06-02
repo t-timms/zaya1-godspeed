@@ -9,7 +9,6 @@ print(f"vLLM path: {vllm.__file__}")
 
 # 1. Zaya model
 try:
-
     print("ZayaForCausalLM import: OK")
 except Exception as e:
     print(f"ZayaForCausalLM import: FAILED - {e}")
@@ -28,14 +27,12 @@ except Exception as e:
 
 # 3. CCA attention
 try:
-
     print("CCA attention: OK")
 except Exception as e:
     print(f"CCA attention: FAILED - {e}")
 
 # 4. NVFP4 scheme
 try:
-
     print("CT W4A16Fp4: OK")
 except Exception as e:
     print(f"CT W4A16Fp4: FAILED - {e}")
@@ -48,7 +45,7 @@ try:
 except ImportError:
     # v0.20.2 uses different path
     try:
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: F401
             CompressedTensorsConfig,
         )
 
@@ -58,7 +55,6 @@ except ImportError:
 
 # 6. Zaya tool parser
 try:
-
     print("ZayaToolParser: OK")
 except Exception as e:
     print(f"ZayaToolParser: FAILED - {e}")

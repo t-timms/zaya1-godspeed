@@ -2,17 +2,17 @@ p = "/root/vllm-ct-env/lib/python3.12/site-packages/vllm/model_executor/kernels/
 with open(p) as f:
     c = f.read()
 
-old = '''    raise ValueError(
+old = """    raise ValueError(
         "Failed to find a kernel that can implement the "
         "WNA16 linear layer. Reasons: \\n" + "\\n".join(failure_reasons)
-    )'''
+    )"""
 
-new = '''    import logging
+new = """    import logging
     logging.getLogger(__name__).warning(
         "No WNA16 kernel, using unquantized fallback. Reasons: %s",
         "; ".join(failure_reasons)
     )
-    return None'''
+    return None"""
 
 if old in c:
     c = c.replace(old, new)
@@ -24,10 +24,10 @@ else:
     if "Failed to find a kernel that can implement the" in c:
         print("Found target line, trying different pattern")
         # Try with single backslash
-        old2 = '''    raise ValueError(
+        old2 = """    raise ValueError(
         "Failed to find a kernel that can implement the "
         "WNA16 linear layer. Reasons: \\n" + "\\n".join(failure_reasons)
-    )'''
+    )"""
         if old2 in c:
             c = c.replace(old2, new)
             with open(p, "w") as f:

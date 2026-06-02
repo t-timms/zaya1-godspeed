@@ -62,8 +62,7 @@ GLOBAL_SCALE_NUM = FP8_E4M3_MAX * FP4_E2M1_MAX  # = 2688.0
 SATURATION_THRESHOLD = (GLOBAL_SCALE_NUM * FP8_E4M3_MAX) ** 0.5  # ≈ 1097.0
 
 DEFAULT_CKPT = Path(
-    "/mnt/c/Users/ttimm/Documents/Project Portfolio/"
-    "zaya1-godspeed/zaya1-8b-nvfp4-w4a4/model.safetensors"
+    "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-w4a4/model.safetensors"
 )
 DEFAULT_CONFIG = DEFAULT_CKPT.with_name("config.json")
 
@@ -80,25 +79,11 @@ def compute_corrected_igs(max_abs: float) -> float:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Fix input_global_scale for outlier layers."
-    )
-    parser.add_argument(
-        "--checkpoint", type=Path, default=DEFAULT_CKPT,
-        help="Path to model.safetensors"
-    )
-    parser.add_argument(
-        "--config", type=Path, default=DEFAULT_CONFIG,
-        help="Path to config.json"
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Print changes without modifying the checkpoint"
-    )
-    parser.add_argument(
-        "--force", action="store_true",
-        help="Apply changes without creating a backup"
-    )
+    parser = argparse.ArgumentParser(description="Fix input_global_scale for outlier layers.")
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CKPT, help="Path to model.safetensors")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Path to config.json")
+    parser.add_argument("--dry-run", action="store_true", help="Print changes without modifying the checkpoint")
+    parser.add_argument("--force", action="store_true", help="Apply changes without creating a backup")
     args = parser.parse_args()
 
     # ── Load checkpoint metadata ──────────────────────────────────────
@@ -115,9 +100,7 @@ def main() -> int:
     state = st.load_file(str(args.checkpoint), device="cpu")
 
     # ── Identify all input_global_scale entries ───────────────────────
-    igs_keys = sorted(
-        k for k in state if k.endswith("input_global_scale") and state[k].numel() == 1
-    )
+    igs_keys = sorted(k for k in state if k.endswith("input_global_scale") and state[k].numel() == 1)
     print(f"Found {len(igs_keys)} per-Linear input_global_scale entries")
 
     # ── Analyze and patch ─────────────────────────────────────────────
@@ -152,29 +135,28 @@ def main() -> int:
     # ── Report ────────────────────────────────────────────────────────
     print(f"\n{'=' * 80}")
     print(f"Outlier Analysis: {len(patches)} layers need input_global_scale correction")
-    print(f"Saturation threshold (max_abs > {SATURATION_THRESHOLD:.0f}): "
-          f"per-block FP8 scale overflows FP8_E4M3_MAX={FP8_E4M3_MAX}")
+    print(
+        f"Saturation threshold (max_abs > {SATURATION_THRESHOLD:.0f}): "
+        f"per-block FP8 scale overflows FP8_E4M3_MAX={FP8_E4M3_MAX}"
+    )
     print(f"{'=' * 80}\n")
 
-    print(f"{'#':>3}  {'max_abs(x)':>10}  {'old_igs':>10}  {'new_igs':>10}  "
-          f"{'sat_ratio':>10}  {'fix_gain':>10}  module")
-    print(f"{'-' * 3}  {'-' * 10}  {'-' * 10}  {'-' * 10}  "
-          f"{'-' * 10}  {'-' * 10}  {'-' * 50}")
+    print(
+        f"{'#':>3}  {'max_abs(x)':>10}  {'old_igs':>10}  {'new_igs':>10}  {'sat_ratio':>10}  {'fix_gain':>10}  module"
+    )
+    print(f"{'-' * 3}  {'-' * 10}  {'-' * 10}  {'-' * 10}  {'-' * 10}  {'-' * 10}  {'-' * 50}")
 
     for i, (key, ma, old, new, sat_ratio) in enumerate(patches):
         fix_gain = new / old
         short = key.replace("model.layers.", "L").replace(".input_global_scale", "")
-        print(f"{i + 1:>3}  {ma:>10.1f}  {old:>10.4f}  {new:>10.4f}  "
-              f"{sat_ratio:>10.2f}  {fix_gain:>10.2f}  {short}")
+        print(f"{i + 1:>3}  {ma:>10.1f}  {old:>10.4f}  {new:>10.4f}  {sat_ratio:>10.2f}  {fix_gain:>10.2f}  {short}")
 
     print("\nSummary:")
     print(f"  Layers patched:     {len(patches)}")
     print(f"  Total sat loss:     {total_saturation_loss:.2f}x")
     print(f"  Total fix gain:     {total_fix_gain:.2f}x")
-    print(f"  Worst offender:     max_abs={patches[0][1]:.0f} at "
-          f"{patches[0][0].replace('.input_global_scale','')}")
-    print(f"  Worst fix gain:     {patches[0][3]/patches[0][2]:.1f}x "
-          f"better quantization resolution")
+    print(f"  Worst offender:     max_abs={patches[0][1]:.0f} at {patches[0][0].replace('.input_global_scale', '')}")
+    print(f"  Worst fix gain:     {patches[0][3] / patches[0][2]:.1f}x better quantization resolution")
 
     # ── Apply ─────────────────────────────────────────────────────────
     if args.dry_run:
@@ -189,8 +171,7 @@ def main() -> int:
     backup_path = args.checkpoint.with_suffix(".safetensors.bak.outlier")
     if not args.force:
         if backup_path.exists():
-            print(f"\nERROR: Backup already exists at {backup_path}. "
-                  f"Use --force to overwrite.", file=sys.stderr)
+            print(f"\nERROR: Backup already exists at {backup_path}. Use --force to overwrite.", file=sys.stderr)
             return 1
 
     print(f"\nCreating backup: {backup_path}")

@@ -5,6 +5,7 @@ Session 2 fix adapted for vllm-src editable install at /home/ttimm/vllm-src/.
 Bypasses Marlin MoE kernel (which corrupts FP8_E4M3 scales via S0E5M3 sign flip)
 and uses correct Python dequant identical to the working Linear fallback path.
 """
+
 from pathlib import Path
 
 MOE = Path(
@@ -113,7 +114,7 @@ else:
     print("  [SKIP 1] process_weights_after_loading not found (may already be patched)")
 
 # ── Fix 2: get_fused_moe_quant_config ──
-old_qc = '''    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+old_qc = """    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
@@ -122,13 +123,13 @@ old_qc = '''    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> 
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-        )'''
+        )"""
 
-new_qc = '''    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+new_qc = """    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         from vllm.model_executor.layers.fused_moe.config import (
             FUSED_MOE_UNQUANTIZED_CONFIG,
         )
-        return FUSED_MOE_UNQUANTIZED_CONFIG'''
+        return FUSED_MOE_UNQUANTIZED_CONFIG"""
 
 if old_qc in content:
     content = content.replace(old_qc, new_qc)
@@ -137,7 +138,7 @@ else:
     print("  [SKIP 2] get_fused_moe_quant_config not found")
 
 # ── Fix 3: apply ──
-old_apply = '''    def apply(
+old_apply = """    def apply(
         self,
         layer: FusedMoE,
         x: torch.Tensor,
@@ -157,7 +158,7 @@ old_apply = '''    def apply(
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts_input=shared_experts_input,
-        )'''
+        )"""
 
 new_apply = '''    def apply(
         self,

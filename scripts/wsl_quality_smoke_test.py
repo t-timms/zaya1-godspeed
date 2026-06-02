@@ -27,14 +27,8 @@ THINK_END = "</think>"
 ZYPHRA_TOOL_CALL_START = "<zyphra_tool_call>"
 ZYPHRA_TOOL_CALL_END = "</zyphra_tool_call>"
 
-MODEL_DIR = (
-    "/mnt/c/Users/ttimm/Documents/Project Portfolio/"
-    "zaya1-godspeed/zaya1-8b-nvfp4-ct"
-)
-PROMPTS_FILE = (
-    "/mnt/c/Users/ttimm/Documents/Project Portfolio/"
-    "zaya1-godspeed/prompts/smoke_test.jsonl"
-)
+MODEL_DIR = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-ct"
+PROMPTS_FILE = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/prompts/smoke_test.jsonl"
 
 
 def load_prompts(path: str) -> list[dict[str, Any]]:
@@ -95,9 +89,7 @@ def check_code_block(text: str, prompt_id: str) -> bool:
 def check_tool_call_xml(text: str, prompt_id: str) -> bool:
     if ZYPHRA_TOOL_CALL_START not in text:
         return True  # acceptable for non-tool prompts
-    pattern = re.compile(
-        r"<zyphra_tool_call>(.*?)</zyphra_tool_call>", re.DOTALL
-    )
+    pattern = re.compile(r"<zyphra_tool_call>(.*?)</zyphra_tool_call>", re.DOTALL)
     matches = pattern.findall(text)
     if not matches:
         print(f"  [{prompt_id}] FAIL: malformed tool-call XML")
@@ -106,21 +98,19 @@ def check_tool_call_xml(text: str, prompt_id: str) -> bool:
         try:
             parsed = json.loads(body.strip())
             if not parsed.get("name"):
-                print(f"  [{prompt_id}] FAIL: tool call #{i+1} missing 'name'")
+                print(f"  [{prompt_id}] FAIL: tool call #{i + 1} missing 'name'")
                 return False
             if not isinstance(parsed.get("arguments"), dict):
-                print(f"  [{prompt_id}] FAIL: tool call #{i+1} 'arguments' not dict")
+                print(f"  [{prompt_id}] FAIL: tool call #{i + 1} 'arguments' not dict")
                 return False
         except json.JSONDecodeError as e:
-            print(f"  [{prompt_id}] FAIL: tool call #{i+1} invalid JSON: {e}")
+            print(f"  [{prompt_id}] FAIL: tool call #{i + 1} invalid JSON: {e}")
             return False
     return True
 
 
 def check_math_answer(text: str, prompt_id: str) -> bool:
-    has_numbers = bool(
-        re.search(r"\d+\.?\d*\s*(?:mph|km/h|miles|km|average)", text, re.IGNORECASE)
-    )
+    has_numbers = bool(re.search(r"\d+\.?\d*\s*(?:mph|km/h|miles|km|average)", text, re.IGNORECASE))
     if not has_numbers:
         print(f"  [{prompt_id}] WARN: no numeric result detected")
     return True  # not a hard failure
@@ -180,7 +170,7 @@ def main() -> int:
         required_checks = prompt_data.get("checks", [])
         text = output.outputs[0].text
 
-        print(f"--- [{i+1}/{total}] {pid} ({purpose}) ---")
+        print(f"--- [{i + 1}/{total}] {pid} ({purpose}) ---")
         print(f"  Prompt: {prompt_data['prompt'][:100]}...")
         print(f"  Response ({len(text)} chars):")
         # Show first 500 chars

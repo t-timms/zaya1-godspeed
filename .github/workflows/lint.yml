@@ -1,0 +1,35 @@
+name: lint
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    name: ruff (lint + format)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Pinned to the version used locally so CI and dev never drift.
+      - name: Install ruff
+        run: pip install ruff==0.15.12
+
+      - name: Ruff lint
+        run: ruff check --output-format=github .
+
+      - name: Ruff format check
+        run: ruff format --check .

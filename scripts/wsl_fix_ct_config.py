@@ -14,6 +14,7 @@ else:
     # File might be corrupted by nano - check for similar pattern
     if "input_quant.num_bits" in c:
         import re
+
         c = re.sub(r"weight_quant\.num_bits == input_quant\.num_bits == 8", new, c)
         with open(p, "w") as f:
             f.write(c)

@@ -1,4 +1,5 @@
 """Quick inference test with zaya1 NVFP4 model."""
+
 import sys
 
 sys.path.insert(0, "/home/ttimm/vllm-src")
@@ -32,6 +33,7 @@ def main():
         print("INFERENCE TEST PASSED — coherent output confirmed")
     else:
         print(f"Output received: '{text}'")
+
 
 if __name__ == "__main__":
     main()

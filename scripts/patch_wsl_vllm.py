@@ -1,7 +1,6 @@
 """Apply 3 patches to stock vLLM 0.20.2 in WSL2 for Zaya support."""
 
 import os
-import sys
 
 VLLM_PATH = "/root/vllm-env/lib/python3.12/site-packages/vllm"
 
@@ -9,16 +8,24 @@ patches = []
 
 # 1. Register ZayaForCausalLM in ModelRegistry
 registry_path = os.path.join(VLLM_PATH, "model_executor", "models", "registry.py")
-patches.append(("ModelRegistry registration", registry_path, [
-    # Find the registration block and add ZayaForCausalLM
-    ('_TEXT_GENERATION_MODELS.update({', '_TEXT_GENERATION_MODELS.update({\n    "ZayaForCausalLM": ("zaya", "ZayaForCausalLM"),'),
-]))
+patches.append(
+    (
+        "ModelRegistry registration",
+        registry_path,
+        [
+            # Find the registration block and add ZayaForCausalLM
+            (
+                "_TEXT_GENERATION_MODELS.update({",
+                '_TEXT_GENERATION_MODELS.update({\n    "ZayaForCausalLM": ("zaya", "ZayaForCausalLM"),',
+            ),
+        ],
+    )
+)
 
-# 2. cca_state_shape in MambaStateShapeCalculator  
+# 2. cca_state_shape in MambaStateShapeCalculator
 mamba_path = os.path.join(VLLM_PATH, "v1", "worker", "gpu_model_runner.py")
 # Might be in different location in 0.20.2
 
-import subprocess
 
 # Read the registry file
 with open(registry_path) as f:
@@ -46,7 +53,7 @@ for root, dirs, files in os.walk(VLLM_PATH):
                     c = fh.read()
             except Exception:
                 continue
-            
+
             if "class MambaStateShapeCalculator" in c and "cca_state_shape" not in c:
                 # Add cca_state_shape method
                 new_method = '''
@@ -82,7 +89,7 @@ for root, dirs, files in os.walk(VLLM_PATH):
                     c = fh.read()
             except Exception:
                 continue
-            
+
             if "class MambaStateDtypeCalculator" in c and "cca_state_dtype" not in c:
                 new_method = '''
     def cca_state_dtype(self, model_config):

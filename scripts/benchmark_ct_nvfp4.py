@@ -19,10 +19,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import time
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -55,14 +53,17 @@ THRESHOLDS: dict[str, float] = {
 
 def decompress_model_to_transformers() -> Any:
     """Decompress CT NVFP4 model into a BF16 HuggingFace model in memory."""
-    import torch
     import safetensors.torch as st
+    import torch
 
     log.info("Loading original BF16 model...")
     from transformers import AutoModelForCausalLM
 
     model = AutoModelForCausalLM.from_pretrained(
-        "Zyphra/ZAYA1-8B", torch_dtype=torch.bfloat16, device_map="cpu", trust_remote_code=True,
+        "Zyphra/ZAYA1-8B",
+        torch_dtype=torch.bfloat16,
+        device_map="cpu",
+        trust_remote_code=True,
     )
 
     log.info("Loading CT state dict...")
@@ -92,10 +93,12 @@ def decompress_model_to_transformers() -> Any:
     return model
 
 
-def run_lm_eval(model: Any, tokenizer: Any, tasks: list[str], output_dir: Path, skip_gated: bool = False) -> dict[str, Any]:
+def run_lm_eval(
+    model: Any, tokenizer: Any, tasks: list[str], output_dir: Path, skip_gated: bool = False
+) -> dict[str, Any]:
     """Run lm_eval on the decompressed model via hf model instance."""
-    import torch
     import lm_eval
+    import torch
     from lm_eval.models.huggingface import HFLM
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -109,6 +112,7 @@ def run_lm_eval(model: Any, tokenizer: Any, tasks: list[str], output_dir: Path, 
     if skip_gated:
         try:
             import huggingface_hub
+
             hf_token = huggingface_hub.get_token()
             log.info("HF token: %s", "found" if hf_token else "not set — gated datasets will fail")
         except Exception:
@@ -172,8 +176,7 @@ def print_summary(results: dict[str, Any], tasks: list[str]) -> None:
         delta = (score - baseline) if score else 0
         status = "PASS" if delta >= threshold else "FAIL"
 
-        log.info("%-20s | BF16: %5.1f | NVFP4: %5.1f | %+.1f | %s",
-                 task.upper(), baseline, score or 0, delta, status)
+        log.info("%-20s | BF16: %5.1f | NVFP4: %5.1f | %+.1f | %s", task.upper(), baseline, score or 0, delta, status)
         if delta < threshold:
             all_pass = False
 
@@ -183,8 +186,9 @@ def print_summary(results: dict[str, Any], tasks: list[str]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark NVFP4 CT model vs BF16 baselines")
-    parser.add_argument("--tasks", nargs="+", default=["aime26"],
-                        choices=["all", "aime26", "gpqa", "mmlu_pro", "livecodebench"])
+    parser.add_argument(
+        "--tasks", nargs="+", default=["aime26"], choices=["all", "aime26", "gpqa", "mmlu_pro", "livecodebench"]
+    )
     parser.add_argument("--output-dir", default="benchmarks")
     parser.add_argument("--run-all", action="store_true", help="Run all 4 benchmarks (2+ hours)")
     parser.add_argument("--skip-gated", action="store_true", help="Skip gated datasets (GPQA)")
@@ -197,11 +201,17 @@ def main() -> int:
 
     log.info("=== NVFP4 CT Benchmark ===")
     log.info("Tasks: %s", tasks)
-    log.info("Baselines: AIME=%.1f GPQA=%.1f MMLU-Pro=%.1f LCB=%.1f",
-             BASELINES["aime26"], BASELINES["gpqa"], BASELINES["mmlu_pro"], BASELINES["livecodebench"])
+    log.info(
+        "Baselines: AIME=%.1f GPQA=%.1f MMLU-Pro=%.1f LCB=%.1f",
+        BASELINES["aime26"],
+        BASELINES["gpqa"],
+        BASELINES["mmlu_pro"],
+        BASELINES["livecodebench"],
+    )
 
     try:
         import lm_eval
+
         log.info("lm_eval %s: OK", lm_eval.__version__)
     except ImportError:
         log.error("lm_eval not installed. Run: pip install lm-eval")
@@ -209,6 +219,7 @@ def main() -> int:
 
     model = decompress_model_to_transformers()
     from transformers import AutoTokenizer
+
     tok = AutoTokenizer.from_pretrained("Zyphra/ZAYA1-8B", trust_remote_code=True)
     results = run_lm_eval(model, tok, tasks, Path(args.output_dir), skip_gated=args.skip_gated)
     print_summary(results, tasks)

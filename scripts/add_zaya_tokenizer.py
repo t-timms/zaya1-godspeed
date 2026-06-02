@@ -1,4 +1,5 @@
 """Add ZayaConfig -> Qwen2Tokenizer mapping to transformers."""
+
 import sys
 
 sys.path.insert(0, "/home/ttimm/vllm-env/lib")
@@ -15,6 +16,7 @@ if ZayaConfig not in TOKENIZER_MAPPING:
     # Also register the slow tokenizer if available
     try:
         from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+
         # Slow tokenizer is typically not mapped separately, just verifying
         print(f"Qwen2Tokenizer also available: {Qwen2Tokenizer}")
     except ImportError:

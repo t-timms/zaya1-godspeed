@@ -69,9 +69,7 @@ def main() -> int:
             ok = mae < 1.0 and mre < 0.2
             dt = str(dtype).removeprefix("torch.")
             status = "PASS" if ok else "FAIL"
-            print(
-                f"{m:>5} {n:>5} {pk * 2:>5} {dt:>10} {mae:>12.4f} {mre:>14.4f}  {status}"
-            )
+            print(f"{m:>5} {n:>5} {pk * 2:>5} {dt:>10} {mae:>12.4f} {mre:>14.4f}  {status}")
             if not ok:
                 fails += 1
     print()

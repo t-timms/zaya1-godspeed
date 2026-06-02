@@ -58,6 +58,6 @@ else:
     for i, line in enumerate(lines):
         if "def _skip_marlin_if_unaligned" in line:
             print("Found at line", i)
-            for j in range(i, min(i+15, len(lines))):
+            for j in range(i, min(i + 15, len(lines))):
                 print(f"  {j}: {lines[j]}")
             break

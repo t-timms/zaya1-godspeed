@@ -1,4 +1,5 @@
 """Fix f-string bugs in zaya.py."""
+
 path = "/home/ttimm/vllm-src/vllm/model_executor/models/zaya.py"
 
 with open(path) as f:

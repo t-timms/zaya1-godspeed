@@ -18,10 +18,7 @@ FP8_MAX = 448.0
 FP4_MAX = 6.0
 GS_NUM = FP8_MAX * FP4_MAX  # 2688
 
-CKPT = Path(
-    "/mnt/c/Users/ttimm/Documents/Project Portfolio/"
-    "zaya1-godspeed/zaya1-8b-nvfp4-w4a4/model.safetensors"
-)
+CKPT = Path("/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-w4a4/model.safetensors")
 
 
 def main() -> int:
@@ -56,27 +53,26 @@ def main() -> int:
     igs_vals = [r[1] for r in rows]
     median_igs = sorted(igs_vals)[len(igs_vals) // 2]
 
-    print(f"max_act stats:  median={median_ma:.1f}  mean={mean_ma:.1f}  "
-          f"max={max_act_vals[0]:.1f}  min={max_act_vals[-1]:.1f}")
-    print(f"igs stats:      median={median_igs:.6f}  "
-          f"min={igs_vals[-1]:.6f}  max={igs_vals[0]:.6f}")
+    print(
+        f"max_act stats:  median={median_ma:.1f}  mean={mean_ma:.1f}  "
+        f"max={max_act_vals[0]:.1f}  min={max_act_vals[-1]:.1f}"
+    )
+    print(f"igs stats:      median={median_igs:.6f}  min={igs_vals[-1]:.6f}  max={igs_vals[0]:.6f}")
     print()
 
     # Find layers where max_act > 3 * median (outlier threshold)
     outlier_threshold = median_ma * 3
     outliers = [r for r in rows if r[0] > outlier_threshold]
-    print(f"Outliers (max_act > {outlier_threshold:.0f} = 3x median): "
-          f"{len(outliers)} layers\n")
+    print(f"Outliers (max_act > {outlier_threshold:.0f} = 3x median): {len(outliers)} layers\n")
 
-    print(f"{'max_act':>10}  {'igs':>12}  {'p50_fp8_scale':>14}  "
-          f"{'p10_fp8_scale':>14}  module")
+    print(f"{'max_act':>10}  {'igs':>12}  {'p50_fp8_scale':>14}  {'p10_fp8_scale':>14}  module")
     print("-" * 90)
     for ma, igs, p50, p10, k in outliers:
         short = k.replace("model.layers.", "L").replace(".input_global_scale", "")
         print(f"{ma:>10.1f}  {igs:>12.6f}  {p50:>14.2f}  {p10:>14.2f}  {short}")
 
     print(f"\nTotal layers analyzed: {len(rows)}")
-    print(f"Outlier layers: {len(outliers)} ({100*len(outliers)/len(rows):.1f}%)")
+    print(f"Outlier layers: {len(outliers)} ({100 * len(outliers) / len(rows):.1f}%)")
     print("Recommendation:")
     print("  Current IGS convention is correct. Outlier layers have low IGS")
     print("  because max_act is high. This prevents FP8 scale saturation but")

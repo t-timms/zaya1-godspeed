@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Quick 1-prompt quality check."""
+
 from __future__ import annotations
 
 import multiprocessing
@@ -9,27 +10,27 @@ import sys
 def main() -> int:
     from vllm import LLM, SamplingParams
 
-    MODEL_DIR = (
-        "/mnt/c/Users/ttimm/Documents/Project Portfolio/"
-        "zaya1-godspeed/zaya1-8b-nvfp4-ct-gs16"
-    )
+    MODEL_DIR = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-ct-gs16"
 
     print("Loading model...")
     llm = LLM(
-        model=MODEL_DIR, dtype="bfloat16", max_model_len=2048,
-        trust_remote_code=True, enforce_eager=True, max_num_seqs=1,
+        model=MODEL_DIR,
+        dtype="bfloat16",
+        max_model_len=2048,
+        trust_remote_code=True,
+        enforce_eager=True,
+        max_num_seqs=1,
         tokenizer="Zyphra/ZAYA1-8B",
     )
 
     from transformers import AutoTokenizer
+
     tok = AutoTokenizer.from_pretrained("Zyphra/ZAYA1-8B", trust_remote_code=True)
 
     # Try two prompts: raw text completion + chat-template
     raw_prompt = "The capital of France is"
     msgs = [{"role": "user", "content": "Explain what a binary search tree is in one sentence."}]
-    chat_prompt = tok.apply_chat_template(
-        msgs, add_generation_prompt=True, tokenize=False, enable_thinking=True
-    )
+    chat_prompt = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False, enable_thinking=True)
 
     print(f"Raw prompt: {raw_prompt!r}")
     print(f"Chat prompt ({len(chat_prompt)} chars): {chat_prompt[:120]}...")

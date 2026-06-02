@@ -36,8 +36,14 @@ from vllm.v1.worker.workspace import init_workspace_manager  # noqa: E402
 
 
 def run_one(
-    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype,
-    a_scale: float = 1.0, realistic_gs: bool = False,
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    a_scale: float = 1.0,
+    realistic_gs: bool = False,
 ) -> tuple[float, float, bool]:
     set_random_seed(7)
     quant_blocksize = 16
@@ -45,7 +51,13 @@ def run_one(
     a = torch.randn((m, k), device="cuda", dtype=dtype) * a_scale
 
     (_, w1_q, w1_blockscale, w1_gs), (_, w2_q, w2_blockscale, w2_gs) = make_test_weights(
-        e, n, k, in_dtype=dtype, quant_dtype="nvfp4", block_shape=None, per_out_ch_quant=False,
+        e,
+        n,
+        k,
+        in_dtype=dtype,
+        quant_dtype="nvfp4",
+        block_shape=None,
+        per_out_ch_quant=False,
     )
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
@@ -71,38 +83,56 @@ def run_one(
     moe_config = make_dummy_moe_config()
     kernel = mk.FusedMoEKernel(
         maybe_make_prepare_finalize(
-            moe=moe_config, quant_config=quant_config, allow_new_interface=True, use_monolithic=False,
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
         ),
         CutlassExpertsFp4(moe_config=moe_config, quant_config=quant_config),
         inplace=False,
     )
 
     cutlass_output = kernel.apply(
-        hidden_states=a, w1=w1_q, w2=w2_q,
-        topk_weights=topk_weights, topk_ids=topk_ids,
-        global_num_experts=e, activation=mk.MoEActivation.SILU,
-        apply_router_weight_on_input=False, expert_map=None,
+        hidden_states=a,
+        w1=w1_q,
+        w2=w2_q,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        global_num_experts=e,
+        activation=mk.MoEActivation.SILU,
+        apply_router_weight_on_input=False,
+        expert_map=None,
     )
 
-    a_global_scale = (
-        (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a.flatten(), dim=-1)
-    ).to(torch.float32)
+    a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a.flatten(), dim=-1)).to(torch.float32)
     a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a, a_global_scale)
     a_in_dtype = dequantize_nvfp4_to_dtype(
-        a_fp4, a_scale_interleaved, a_global_scale,
-        dtype=a.dtype, device=a.device, block_size=quant_blocksize,
+        a_fp4,
+        a_scale_interleaved,
+        a_global_scale,
+        dtype=a.dtype,
+        device=a.device,
+        block_size=quant_blocksize,
     )
 
     w1_d = torch.empty((e, 2 * n, k), device="cuda", dtype=dtype)
     w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
     for idx in range(e):
         w1_d[idx] = dequantize_nvfp4_to_dtype(
-            w1_q[idx], w1_blockscale[idx], w1_gs[idx],
-            dtype=dtype, device=w1_q.device, block_size=quant_blocksize,
+            w1_q[idx],
+            w1_blockscale[idx],
+            w1_gs[idx],
+            dtype=dtype,
+            device=w1_q.device,
+            block_size=quant_blocksize,
         )
         w2_d[idx] = dequantize_nvfp4_to_dtype(
-            w2_q[idx], w2_blockscale[idx], w2_gs[idx],
-            dtype=dtype, device=w2_q.device, block_size=quant_blocksize,
+            w2_q[idx],
+            w2_blockscale[idx],
+            w2_gs[idx],
+            dtype=dtype,
+            device=w2_q.device,
+            block_size=quant_blocksize,
         )
 
     torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
@@ -125,7 +155,7 @@ def main() -> int:
         cases = [
             (8, 2048, 2048, 16, 1, 0.1, False),  # vanilla synthetic (control)
             (8, 2048, 2048, 16, 1, 1.0, False),  # larger inputs, a_gs=1
-            (8, 2048, 2048, 16, 1, 1.0, True),   # realistic a_gscale
+            (8, 2048, 2048, 16, 1, 1.0, True),  # realistic a_gscale
             (8, 2048, 2048, 16, 1, 10.0, True),  # realistic + Zaya-magnitude inputs
         ]
         print()
@@ -134,8 +164,14 @@ def main() -> int:
         for m, n, k, e, topk, a_sc, gs in cases:
             try:
                 mae, mre, has_nan = run_one(
-                    m, n, k, e, topk, torch.bfloat16,
-                    a_scale=a_sc, realistic_gs=gs,
+                    m,
+                    n,
+                    k,
+                    e,
+                    topk,
+                    torch.bfloat16,
+                    a_scale=a_sc,
+                    realistic_gs=gs,
                 )
                 gs_lbl = "Y" if gs else "N"
                 nan_lbl = "YES" if has_nan else "no"

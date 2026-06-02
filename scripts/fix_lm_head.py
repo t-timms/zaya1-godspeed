@@ -1,4 +1,5 @@
 """Fix lm_head NVFP4 dequant for tied embeddings in zaya.py."""
+
 path = "/home/ttimm/vllm-src/vllm/model_executor/models/zaya.py"
 with open(path) as f:
     content = f.read()
@@ -17,22 +18,22 @@ else:
 
 # Fix 2: Collect lm_head keys instead of skipping
 old_skip = (
-    '            if chkpt_weight_name not in params_dict:\n'
-    '                logger.info(\n'
+    "            if chkpt_weight_name not in params_dict:\n"
+    "                logger.info(\n"
     '                    f"WARNING: key {chkpt_weight_name} not in params! Skipping loading"\n'
-    '                )\n'
-    '                continue'
+    "                )\n"
+    "                continue"
 )
 new_skip = (
-    '            if chkpt_weight_name not in params_dict:\n'
-    '                # Collect lm_head NVFP4 weights for tied-embedding dequant\n'
+    "            if chkpt_weight_name not in params_dict:\n"
+    "                # Collect lm_head NVFP4 weights for tied-embedding dequant\n"
     '                if "lm_head." in chkpt_weight_name:\n'
-    '                    lm_head_buffers[chkpt_weight_name] = loaded_weight\n'
-    '                    continue\n'
-    '                logger.info(\n'
+    "                    lm_head_buffers[chkpt_weight_name] = loaded_weight\n"
+    "                    continue\n"
+    "                logger.info(\n"
     '                    f"WARNING: key {chkpt_weight_name} not in params! Skipping loading"\n'
-    '                )\n'
-    '                continue'
+    "                )\n"
+    "                continue"
 )
 if old_skip in content:
     content = content.replace(old_skip, new_skip)
@@ -71,7 +72,7 @@ new_class = (
     '        scale_key = [k for k in buffers if "weight_scale" in k]\n'
     "        \n"
     "        if not packed_key:\n"
-    "            logger.warning(\"lm_head weight_packed not found in buffers\")\n"
+    '            logger.warning("lm_head weight_packed not found in buffers")\n'
     "            return\n"
     "        \n"
     "        packed = buffers[packed_key[0]]\n"
@@ -108,7 +109,7 @@ new_class = (
     "        \n"
     "        weight = weight.bfloat16()\n"
     "        self.model.embed_tokens.weight.data.copy_(weight)\n"
-    "        logger.info(\"Dequantized lm_head NVFP4 -> embed_tokens.weight shape=%s\", list(weight.shape))\n"
+    '        logger.info("Dequantized lm_head NVFP4 -> embed_tokens.weight shape=%s", list(weight.shape))\n'
 )
 if old_class in content:
     content = content.replace(old_class, new_class)

@@ -1,4 +1,5 @@
 """Fix config.json group_size for gs16 model."""
+
 import json
 
 CFG = r"C:\Users\ttimm\Documents\Project Portfolio\zaya1-godspeed\zaya1-8b-nvfp4-ct-gs16\config.json"

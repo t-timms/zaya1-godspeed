@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Instrument the NVFP4 dequant fallback to check global_scale values."""
+
 from __future__ import annotations
 
 import multiprocessing
@@ -7,23 +8,25 @@ import sys
 
 multiprocessing.set_start_method("spawn", force=True)
 
-import logging
+import logging  # noqa: E402
 
 logging.basicConfig(level=logging.WARNING)
+
 
 def main() -> int:
     import torch
     from vllm import LLM
 
-    MODEL_DIR = (
-        "/mnt/c/Users/ttimm/Documents/Project Portfolio/"
-        "zaya1-godspeed/zaya1-8b-nvfp4-ct"
-    )
+    MODEL_DIR = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-ct"
 
     print("Loading model...")
     llm = LLM(
-        model=MODEL_DIR, dtype="float16", max_model_len=256,
-        trust_remote_code=True, enforce_eager=True, max_num_seqs=1,
+        model=MODEL_DIR,
+        dtype="float16",
+        max_model_len=256,
+        trust_remote_code=True,
+        enforce_eager=True,
+        max_num_seqs=1,
         tokenizer="Zyphra/ZAYA1-8B",
     )
 
@@ -49,11 +52,13 @@ def main() -> int:
             "zr": (val.abs().max() < 1e-10).item(),
         }
         status = "OK" if not stats["zr"] and not stats["nan"] else "BAD"
-        print(f"[{status}] {name}: shape={list(param.shape)} "
-              f"range=[{stats['min']:.6f}, {stats['max']:.6f}] "
-              f"mean={stats['mean']:.6e} "
-              f"zeros={stats['zeros']}/{stats['total']} "
-              f"nan={stats['nan']} allzero={stats['zr']}")
+        print(
+            f"[{status}] {name}: shape={list(param.shape)} "
+            f"range=[{stats['min']:.6f}, {stats['max']:.6f}] "
+            f"mean={stats['mean']:.6e} "
+            f"zeros={stats['zeros']}/{stats['total']} "
+            f"nan={stats['nan']} allzero={stats['zr']}"
+        )
         if stats["zr"] or stats["nan"]:
             bad_layers.append(name)
 
@@ -72,12 +77,15 @@ def main() -> int:
         zr = (val.abs().max() < 1e-10).item()
         nan = torch.isnan(val).any().item()
         status = "BAD" if zr or nan else "OK"
-        print(f"[{status}] {name}: _weight_global_scale_data "
-              f"range=[{val.min():.6e}, {val.max():.6e}] "
-              f"mean={val.mean():.6e} nan={nan} allzero={zr}")
+        print(
+            f"[{status}] {name}: _weight_global_scale_data "
+            f"range=[{val.min():.6e}, {val.max():.6e}] "
+            f"mean={val.mean():.6e} nan={nan} allzero={zr}"
+        )
 
     print(f"\nTotal BAD params: {len(bad_layers)}")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

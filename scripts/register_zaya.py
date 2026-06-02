@@ -1,4 +1,5 @@
 """Register ZayaForCausalLM in vLLM ModelRegistry."""
+
 import sys
 
 registry_path = "/home/ttimm/vllm-src/vllm/model_executor/models/registry.py"

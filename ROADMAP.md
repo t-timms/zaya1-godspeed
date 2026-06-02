@@ -292,6 +292,26 @@ published BF16 numbers: GPQA-Diamond 71.0%, MMLU-Pro 74.2%, IFEval 85.58%.
 | MoE tuning config (RTX 5070 Ti) | ⬜ | Missing: `E=16,N=2048,device_name=NVIDIA_GeForce_RTX_5070_Ti.json`. Affects TRITON MoE throughput for BF16-exempt layers only. Generate via `python -m vllm.model_executor.layers.fused_moe.benchmark`. Not a blocker for accuracy benchmarks. |
 | ARCQuant residual channels | ⬜ | After final checkpoint benchmarked. |
 
+#### Engineering Cleanup — Session 15 Action Items ⬜
+
+The following items were identified as unprofessional shortcuts during session 15.
+They don't block benchmark results but should be resolved before publication.
+
+| Item | Priority | Action |
+|------|----------|--------|
+| **Patch file for zaya.py prefix-caching fix** | High | The warn-and-disable fix in `/home/ttimm/vllm-src/vllm/model_executor/models/zaya.py` exists only in the editable install — invisible to anyone cloning this project and lost on env rebuild. Create `patches/vllm_zaya_prefix_caching.patch` via `git diff` from the vllm-src repo. Add apply instructions to `patches/README_W4A4.md`. |
+| **Submit vLLM upstream PR** | Medium | The hard assertion `assert not cache_config.enable_prefix_caching` should be a graceful warn-and-disable for all hybrid Mamba/attention models, not just Zaya. Submit PR to `vllm-project/vllm` targeting `vllm/model_executor/models/zaya.py` and the broader `verify_and_update_config` logic in `model_executor/models/config.py`. This is a legitimate upstream bug. |
+| **Accept GPQA gated dataset terms** | High — blocks benchmark | Visit https://huggingface.co/datasets/Idavidrein/gpqa while logged into HF as Ttimms. Click "Access repository". Without this, `leaderboard_gpqa_diamond` errors on `DatasetNotFoundError`. |
+| **Launch overnight benchmark** | High | Once GPQA is unblocked: `nohup python3 scripts/run_full_benchmarks.py --model ./zaya1-8b-nvfp4-w4a4 --output results/lmeval_w4a4_baseline.json > results/bench_baseline.log 2>&1 &` (from WSL with `vllm-env` active). Full run: GPQA ~15 min + IFEval ~20 min + MMLU-Pro ~20 hrs. |
+| **MoE tuning config** | Low | `E=16,N=2048,device_name=NVIDIA_GeForce_RTX_5070_Ti.json` missing — causes "Using default MoE config" warning on every startup. Generate via `python -m vllm.model_executor.layers.fused_moe.benchmark` in vllm-env. Only affects TRITON MoE backend (BF16-exempt layers); W4A4 layers use CUTLASS. |
+
+**How to create the patch file** (from WSL):
+```bash
+cd /home/ttimm/vllm-src
+git diff HEAD vllm/model_executor/models/zaya.py > \
+    "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/patches/vllm_zaya_prefix_caching.patch"
+```
+
 **Baseline benchmark command** (from WSL, `vllm-env` active):
 ```bash
 cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
@@ -494,6 +514,7 @@ vLLM serve (evaluation) → Godspeed 20-task benchmark → BFCL-v4
 
 ## Reference Links
 
+- [`MODEL_SELECTION.md`](./MODEL_SELECTION.md) — Why ZAYA1-8B for a 16 GB local coding agent (2026-06-02 HF survey: competitor W4A4 quant `switzerchees/ZAYA1-8B-NVFP4`, Qwen3-Coder family VRAM fit analysis, upgrade triggers)
 - [Zyphra/ZAYA1-8B on HuggingFace](https://huggingface.co/Zyphra/ZAYA1-8B)
 - [Technical Report (arXiv 2605.05365)](https://arxiv.org/abs/2605.05365)
 - [Zyphra Blog Post](https://www.zyphra.com/post/zaya1-8b)

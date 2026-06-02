@@ -66,3 +66,11 @@ results/*.json
 checkpoints/
 runs/
 logs/
+
+# Debug/scratch scripts
+scripts/check_*.py
+scripts/test_switzerchees.py
+scripts/verify_switzerchees.py
+
+# Calibration data (large)
+data/calibration/

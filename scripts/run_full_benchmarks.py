@@ -204,7 +204,12 @@ def main() -> int:
         "--no-prefix-caching",
         action="store_false",
         dest="prefix_caching",
-        help="Disable prefix caching (not recommended — dramatically slows MMLU-Pro)",
+        default=False,
+        help=(
+            "Prefix caching is OFF by default and cannot be enabled: Zaya's CCA "
+            "state is not cacheable and zaya.py asserts on it. This flag is kept "
+            "only for explicitness."
+        ),
     )
     parser.add_argument(
         "--tasks",

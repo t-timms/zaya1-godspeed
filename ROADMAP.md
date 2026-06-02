@@ -514,6 +514,7 @@ vLLM serve (evaluation) → Godspeed 20-task benchmark → BFCL-v4
 
 ## Reference Links
 
+- [`MODEL_SELECTION.md`](./MODEL_SELECTION.md) — Why ZAYA1-8B for a 16 GB local coding agent (2026-06-02 HF survey: competitor W4A4 quant `switzerchees/ZAYA1-8B-NVFP4`, Qwen3-Coder family VRAM fit analysis, upgrade triggers)
 - [Zyphra/ZAYA1-8B on HuggingFace](https://huggingface.co/Zyphra/ZAYA1-8B)
 - [Technical Report (arXiv 2605.05365)](https://arxiv.org/abs/2605.05365)
 - [Zyphra Blog Post](https://www.zyphra.com/post/zaya1-8b)

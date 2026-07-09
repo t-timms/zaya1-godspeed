@@ -10,9 +10,12 @@
 4-bit weights *and* 4-bit activations running on native CUTLASS FP4 tensor-core kernels,
 at **102.6 tok/s single-stream / 407.4 tok/s batch-8** in under 6 GB of VRAM.
 
-As far as we know this is the first end-to-end NVFP4 W4A4 serving pipeline for a
-MoE + hybrid-attention model on a consumer Blackwell card. Everything here was
-built and debugged on a single 16 GB GPU.
+One other public NVFP4 W4A4 ZAYA1 checkpoint exists — built with NVIDIA ModelOpt
+and validated on a 96 GB workstation Blackwell card, with no published accuracy or
+throughput numbers ([MODEL_SELECTION.md](./MODEL_SELECTION.md) has the full
+comparison). This project is, as far as we know, the first to do it with
+compressed-tensors on a 16 GB **consumer** card, with its own measured accuracy
+and throughput. Everything here was built and debugged on a single RTX 5070 Ti.
 
 ## Highlights
 
@@ -21,7 +24,7 @@ built and debugged on a single 16 GB GPU.
 | **102.6 tok/s** single / **407.4 tok/s** batch-8 | vLLM + CUDA graphs on RTX 5070 Ti (12.8× over eager mode) |
 | **5.99 GB checkpoint** | 936 Linears in packed NVFP4 W4A4, 384 outlier-sensitive Linears kept BF16 (mixed precision) |
 | **Checkpoint verified healthy** | Budget-forced GPQA-Diamond rises monotonically with reasoning budget — 45.8% → 62.5% at a 12k-token think budget, within CI of Zyphra's BF16 CoT 71.0% |
-| **First ZAYA1-8B GGUF** | 4.76 GB NVFP4 GGUF (4.52 bpw), built before any community GGUF existed |
+| **First ZAYA1-8B GGUF** | 4.76 GB NVFP4 GGUF (4.52 bpw), built early May 2026 — community GGUFs appeared later via [llama.cpp PR #23112](https://github.com/ggml-org/llama.cpp/pull/23112) |
 | **vLLM SM120 source build** | `TORCH_CUDA_ARCH_LIST=12.0` build enabling `cutlass_scaled_fp4_mm_sm120a` + FP4 group MoE GEMM — kernels that ship in vLLM source but not in wheels |
 
 ## Why this is hard

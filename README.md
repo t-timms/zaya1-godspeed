@@ -1,97 +1,109 @@
 # zaya1-godspeed
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://www.python.org/downloads/)
-[![Unsloth](https://img.shields.io/badge/Unsloth-2026.5.2-6C4DFF?style=flat-square)](https://unsloth.ai)
-[![TRL](https://img.shields.io/badge/TRL-v0.24.0-orange?style=flat-square)](https://github.com/huggingface/trl)
+[![vLLM](https://img.shields.io/badge/vLLM-0.20.2%20source%20build-1E90FF?style=flat-square)](https://github.com/vllm-project/vllm)
+[![CUTLASS](https://img.shields.io/badge/CUTLASS-4.4.2%20SM120-76B900?style=flat-square)](https://github.com/NVIDIA/cutlass)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json&style=flat-square)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](./LICENSE)
 
-Fine-tuning Zyphra's ZAYA1-8B for structured multi-turn tool calling with the
-[Godspeed coding agent](https://github.com/omnipotence-eth/godspeed-coding-agent).
+**NVFP4 W4A4 inference for Zyphra's ZAYA1-8B on consumer Blackwell (RTX 5070 Ti, SM120)** —
+4-bit weights *and* 4-bit activations running on native CUTLASS FP4 tensor-core kernels,
+at **102.6 tok/s single-stream / 407.4 tok/s batch-8** in under 6 GB of VRAM.
 
-ZAYA1-8B punches well above its weight on math and coding benchmarks
-(760M active / 8.4B total params, MoE). Per its own [technical report](https://arxiv.org/abs/2605.05365)
-(May 2026), Zyphra **deliberately skipped** the multi-turn agentic RL stage —
-the agentic gap is a training omission, not a capability ceiling. This project
-completes ZAYA1-8B by adding that missing stage, served from a 4-bit NVFP4
-quantization on 16 GB consumer hardware.
+As far as we know this is the first end-to-end NVFP4 W4A4 serving pipeline for a
+MoE + hybrid-attention model on a consumer Blackwell card. Everything here was
+built and debugged on a single 16 GB GPU.
 
-## Status (May 2026)
+## Highlights
 
-- ✅ **NVFP4 Compressed-Tensors ZAYA1-8B** quantized at group_size=16 (5.04 GB)
-- ✅ **First coherent text generation on Blackwell sm_120** via vLLM (May 14, session 2): "The capital of France is" → " Paris."; coherent BST explanation
-- ✅ Serves at ~0.86 tok/s on RTX 5070 Ti (16 GB) using Path A on-the-fly Python dequant; bf16 inference dtype required
-- ⬜ Stage 2 next: custom Blackwell NVFP4 Tensor Core CUDA kernel for >10× speedup
-- ⬜ Phase 3+: Teacher trajectories, SFT, GRPO, BFCL-v4 / τ² evaluation
+| Result | Detail |
+|--------|--------|
+| **102.6 tok/s** single / **407.4 tok/s** batch-8 | vLLM + CUDA graphs on RTX 5070 Ti (12.8× over eager mode) |
+| **5.99 GB checkpoint** | 936 Linears in packed NVFP4 W4A4, 384 outlier-sensitive Linears kept BF16 (mixed precision) |
+| **Checkpoint verified healthy** | Budget-forced GPQA-Diamond rises monotonically with reasoning budget — 45.8% → 62.5% at a 12k-token think budget, within CI of Zyphra's BF16 CoT 71.0% |
+| **First ZAYA1-8B GGUF** | 4.76 GB NVFP4 GGUF (4.52 bpw), built before any community GGUF existed |
+| **vLLM SM120 source build** | `TORCH_CUDA_ARCH_LIST=12.0` build enabling `cutlass_scaled_fp4_mm_sm120a` + FP4 group MoE GEMM — kernels that ship in vLLM source but not in wheels |
 
-See [`RESEARCH.md`](./RESEARCH.md) §5.9–§5.10 for the five-bug debugging story and
-[`ROADMAP.md`](./ROADMAP.md) for phase-by-phase status.
+## Why this is hard
 
-## Quick Start
+ZAYA1-8B is an 80-layer MoE (760M active / 8.4B total) with Zyphra's CCA
+(compressed convolutional attention) — no stock quantization path works:
 
-```bash
-uv sync
-python scripts/test_peft.py   # verify PEFT compatibility
-```
+- **No llama.cpp support** — vLLM is the only viable engine, and stock wheels
+  don't compile the SM120 NVFP4 CUTLASS kernels.
+- **W4A4 means calibrating activation scales**, not just weights. The
+  compressed-tensors calibration path silently swaps `nn.Linear.forward` for a
+  NaN-producing fake-quant wrapper; MoE expert sparsity feeds empty tensors to
+  observer hooks; and the NVFP4 global-scale convention (`2688 / max_abs`,
+  divisor form, with block scales pre-multiplied) is undocumented — getting it
+  wrong produces silent pad-token collapse, not an error.
+- **Evaluating a reasoning model at 4-bit is its own project.** Stock lm-eval
+  harnesses scored the model below random because ZAYA never closes its
+  `<think>` block within budget and answers in `\boxed{}` format. We built
+  s1-style budget-forced harnesses (`scripts/eval_gpqa_budget_forced.py`,
+  `scripts/eval_ifeval_budget_forced.py`) that cap the reasoning trace, inject
+  the close, and score only the final answer — turning a fake "quantization
+  damage" signal into a clean scaling curve.
 
-### Serve the NVFP4 model (WSL)
+| think budget | GPQA-Diamond (n=24, paired) | traces self-closing `</think>` |
+|---|---|---|
+| 2,500 | 45.8% | 1/24 |
+| 5,000 | 45.8% | 2/24 |
+| 12,000 | **62.5%** | 9/24 |
 
-```bash
-# In WSL: apply vLLM patches (idempotent), then run the smoke check.
-source /home/ttimm/vllm-env/bin/activate
-export PATH=/usr/local/cuda/bin:$PATH
-python3 scripts/wsl_fix_moe_scale_routing.py    # session 1
-python3 scripts/wsl_fix_marlin_group_size.py    # session 1
-python3 scripts/wsl_fix_nvfp4_text_gen.py       # session 2
-bash    scripts/wsl_run_quick_check.sh          # dtype=bfloat16 required
-```
+The gap to BF16 is the 16 GB context/reasoning-budget ceiling — not
+quantization damage.
 
-## Project Structure
+## Repo map
 
 ```
 zaya1-godspeed/
 ├── scripts/
-│   ├── train.py                    # QLoRA fine-tuning with TRL SFTTrainer
-│   ├── serve_zaya1.py              # vLLM server launcher (n-gram spec, tool-call support)
-│   ├── serve.py                    # vLLM server launcher for base model
-│   ├── test_peft.py                # PEFT LoRA attach + gradient flow test
-│   ├── remap_to_zaya.py            # Godspeed JSONL → ZAYA XML ChatML + quality gates
-│   ├── mutate_tasks.py             # 20 benchmark tasks → 200+ variants with OOD coverage
-│   └── build_vllm_detached.sh      # Reliable Zyphra vLLM fork build (WSL) (deprecated; use scripts/build_vllm_detached.sh)
-├── configs/
-│   └── lora_tool_call.yaml         # QLoRA config for tool-calling fine-tune
-├── data/
-│   └── generate.py                 # Convert Godspeed sessions to ChatML training data
-├── COMPATIBILITY.md                # Architecture analysis, PEFT gate results, ZAYA XML format
-├── ROADMAP.md                      # 7-phase project plan with status tracking
-└── README.md
+│   ├── quantize_zaya_ct_nvfp4.py       # NVFP4 W4A4 quantization + layer-wise activation calibration
+│   ├── build_calibration_data.py       # Calibration mix (incl. ARC/HellaSwag phase-2 mix)
+│   ├── fix_w4a4_global_scales.py       # Post-hoc global-scale convention repair
+│   ├── verify_w4a4_dequant.py          # Round-trip dequant vs HF reference (≈1% rel. error)
+│   ├── run_full_benchmarks.py          # lm-eval suite w/ CUDA graphs + chat template
+│   ├── eval_gpqa_budget_forced.py      # s1-style budget forcing for GPQA-Diamond
+│   ├── eval_ifeval_budget_forced.py    # Two-stage budget forcing + official IFEval checkers
+│   ├── smoke_test_mixed_precision.py   # Load + coherence + speed gate
+│   └── train.py / remap_to_zaya.py     # QLoRA SFT pipeline (agentic fine-tune phase)
+├── RESEARCH.md      # Full debugging log — every bug, root cause, and fix
+├── PAPER.md         # Write-up draft
+├── ROADMAP.md       # Phase-by-phase status
+└── COMPATIBILITY.md # Architecture analysis, PEFT gate, ZAYA XML format
 ```
 
-## Pipeline
+`RESEARCH.md` is the most useful document in this repo if you're trying to run
+NVFP4 W4A4 on your own SM120 card — it records the full chain of root causes:
+the w13 gate/up shard-split trap, the tied NVFP4 `lm_head` → `embed_tokens`
+bind, the bf16-only inference contract, the global-scale convention, and the
+CUDA-graph memory-profiler flag that silently eats 3.5 GB on a 16 GB card.
 
+## Reproduce
+
+```bash
+# 1. Build vLLM from source with SM120 NVFP4 kernels (WSL2, CUDA 13.x)
+cd vllm-src && TORCH_CUDA_ARCH_LIST=12.0 MAX_JOBS=8 pip install -e . --no-build-isolation
+
+# 2. Quantize (layer-wise GPU calibration, ~10 min on 16 GB)
+python scripts/build_calibration_data.py --arc-mix
+python scripts/quantize_zaya_ct_nvfp4.py --scheme w4a4 --mixed-precision-threshold 500
+
+# 3. Smoke test + benchmarks
+python scripts/smoke_test_mixed_precision.py
+python scripts/run_full_benchmarks.py
 ```
-200 mutated tasks → Godspeed headless (DeepSeek V4 Pro via NIM)
-    → conversation JSONL → remap_to_zaya.py (quality gates)
-    → train_zaya.jsonl → train.py (QLoRA SFT → GRPO)
-    → vLLM serve → Godspeed 20-task benchmark → BFCL-v4
-```
 
-**Teacher model**: DeepSeek V4 Pro via NVIDIA NIM (`nvidia_nim/deepseek-ai/deepseek-v4-pro`).
-Available on NIM free tier. 4 API keys for rate limit rotation.
+## Roadmap: the agentic fine-tune
 
-## Integration
-
-This project produces fine-tuned adapters consumed by the Godspeed coding agent.
-The Godspeed driver catalog registers ZAYA1 under `openai/zaya1-8b`.
-
-## Benchmark Targets
-
-| Benchmark | Current ZAYA1-8B | Target (SFT+GRPO) |
-|-----------|-----------------|-------------------|
-| BFCL-v4 | 39.22 | 50+ |
-| τ² (agentic) | 43.12 | 65–75 |
-| AIME '26 | 89.1 | ≥84 (hard floor) |
-| LiveCodeBench-v6 | 65.8 | ≥60 |
+The original goal stands: Zyphra's technical report
+([arXiv 2605.05365](https://arxiv.org/abs/2605.05365)) deliberately skipped the
+multi-turn agentic RL stage. With fast local W4A4 serving now solved, the next
+phase distills multi-turn tool-calling trajectories from a teacher through the
+[Godspeed coding agent](https://github.com/t-timms/godspeed-coding-agent)
+harness into QLoRA SFT + GRPO — targeting BFCL-v4 and τ² gains on a model that
+runs entirely on a 16 GB consumer card.
 
 ## License
 

@@ -43,6 +43,7 @@ DEFAULT_MODEL = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/z
 # Source: Zyphra/ZAYA1-8B model card.
 BF16_REFERENCE: dict[str, float] = {
     "gpqa_diamond": 0.710,  # GPQA-Diamond
+    "gpqa_cot": 0.710,  # GPQA-Diamond (CoT — same Zyphra reference)
     "mmlu_pro": 0.742,  # MMLU-Pro
     "ifeval": 0.8558,  # IFEval prompt-level-strict
     # Separate harnesses — not run here:
@@ -55,6 +56,11 @@ BF16_REFERENCE: dict[str, float] = {
 # num_fewshot=None → use the task's built-in default (leaderboard tasks already encode this).
 TASKS: dict[str, tuple[str, int | None, str]] = {
     "gpqa_diamond": ("leaderboard_gpqa_diamond", None, "acc_norm"),
+    # gpqa_cot: generative chain-of-thought GPQA-Diamond. ZAYA1-8B is a reasoning
+    # model — the loglikelihood MCQ task above denies it any reasoning and caps it
+    # near random. This is the apples-to-apples task vs Zyphra's CoT 71.0%.
+    # Needs --max-model-len >= 8192 so the <think> trace isn't truncated.
+    "gpqa_cot": ("gpqa_diamond_cot_zeroshot", None, "exact_match"),
     "mmlu_pro": ("leaderboard_mmlu_pro", None, "acc"),
     "ifeval": ("leaderboard_ifeval", None, "prompt_level_strict_acc"),
 }
@@ -65,16 +71,20 @@ def build_model_args(
     gpu_mem: float = 0.92,
     enforce_eager: bool = True,
     prefix_caching: bool = False,
+    kv_cache_dtype: str = "fp8",
+    max_model_len: int = 4096,
 ) -> str:
     # prefix_caching=False: Zaya's CCA state is incompatible with prefix caching.
+    # kv_cache_dtype="auto" keeps the KV cache at the model dtype (bf16) for
+    # accuracy isolation; "fp8" halves KV memory but can cost accuracy.
     args = (
         f"pretrained={model_path},"
         "dtype=bfloat16,"
         "moe_backend=cutlass,"
         f"gpu_memory_utilization={gpu_mem},"
-        "max_model_len=4096,"
+        f"max_model_len={max_model_len},"
         "tensor_parallel_size=1,"
-        "kv_cache_dtype=fp8"
+        f"kv_cache_dtype={kv_cache_dtype}"
     )
     if enforce_eager:
         args += ",enforce_eager=True"
@@ -100,6 +110,17 @@ def _get_metric(task_res: dict, metric_prefix: str) -> float | None:
     # GPQA acc_norm fallback to acc
     if metric_prefix == "acc_norm":
         for alt in ("acc,none", "acc"):
+            val = task_res.get(alt)
+            if isinstance(val, (int, float)):
+                return float(val)
+    # Generative CoT tasks report exact_match under several key/filter variants.
+    if metric_prefix == "exact_match":
+        for alt in (
+            "exact_match,none",
+            "exact_match,flexible-extract",
+            "exact_match,strict-match",
+            "exact_match",
+        ):
             val = task_res.get(alt)
             if isinstance(val, (int, float)):
                 return float(val)
@@ -212,6 +233,26 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--max-model-len",
+        dest="max_model_len",
+        type=int,
+        default=4096,
+        help=(
+            "Max sequence length. Use >=8192 for reasoning/CoT tasks (gpqa_cot) so "
+            "the <think> trace is not truncated. Default 4096 for MCQ tasks."
+        ),
+    )
+    parser.add_argument(
+        "--kv-cache-dtype",
+        dest="kv_cache_dtype",
+        default="fp8",
+        choices=["fp8", "auto", "fp8_e5m2", "fp8_e4m3"],
+        help=(
+            "KV cache dtype. 'fp8' (default) halves KV memory; 'auto' keeps it "
+            "at the model dtype (bf16) for accuracy isolation."
+        ),
+    )
+    parser.add_argument(
         "--tasks",
         nargs="+",
         default=list(TASKS.keys()),
@@ -235,7 +276,14 @@ def main() -> int:
         except Exception:
             pass
 
-    model_args = build_model_args(args.model, args.gpu_mem, args.enforce_eager, args.prefix_caching)
+    model_args = build_model_args(
+        args.model,
+        args.gpu_mem,
+        args.enforce_eager,
+        args.prefix_caching,
+        args.kv_cache_dtype,
+        args.max_model_len,
+    )
     all_results: dict[str, dict] = {}
     t_start = time.time()
 
@@ -253,6 +301,14 @@ def main() -> int:
                 device="cuda",
                 random_seed=42,
                 numpy_random_seed=42,
+                # ZAYA1-8B is instruct-tuned (ships chat_template.jinja). Zyphra's
+                # published BF16 table and the HF Open LLM Leaderboard v2 both
+                # measure instruct models with the chat template applied and
+                # few-shot examples rendered as multi-turn. Without these, IFEval
+                # collapses (~20% vs 85.6% BF16) because the model receives raw
+                # unformatted prompts.
+                apply_chat_template=True,
+                fewshot_as_multiturn=True,
             )
             if n_shot_override is not None:
                 kwargs["num_fewshot"] = n_shot_override

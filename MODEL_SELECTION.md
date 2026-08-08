@@ -25,6 +25,7 @@ question is answered — but with gaps that keep our work distinct:
 | Quant toolchain | NVIDIA **ModelOpt** v0.44.0 | **compressed-tensors / llm-compressor** |
 | vLLM | Zyphra prebuilt `zaya1-pr` branch | **Hand-built SM120 CUTLASS from source** |
 | Hardware validated | RTX PRO 6000 (96 GB workstation Blackwell) | **RTX 5070 Ti, 16 GB consumer** |
+| Compute capability | SM120 (`gpu_capability [12, 0]`) | SM120 — **same arch; VRAM budget is the difference, not SM120 support** |
 | Accuracy eval | None — reposts model-card numbers | **Own lm-eval** (ARC, HellaSwag, GPQA/MMLU-Pro/IFEval) |
 | Throughput reported | None | **102 tok/s single / 407 tok/s batch-8** (CUDA graphs) |
 | Outlier handling | Not addressed | Mixed-precision outlier-layer exemption + SOAR/MR-GPTQ |

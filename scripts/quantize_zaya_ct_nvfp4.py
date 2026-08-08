@@ -65,7 +65,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "Zyphra/ZAYA1-8B"
+DEFAULT_MODEL = "Zyphra/ZAYA1-8B-legacy"
 DEFAULT_OUTPUT = "./zaya1-8b-nvfp4-ct"
 DEFAULT_OUTPUT_W4A4 = "./zaya1-8b-nvfp4-w4a4"
 DEFAULT_CALIBRATION_DATA = "data/calibration/calibration_data.pt"
@@ -1128,7 +1128,20 @@ def run_w4a4(args: Any) -> int:
                 if layer_idx is not None:
                     dynamic_outlier_layers.add(layer_idx)
 
-        if dynamic_outlier_layers:
+        no_exempt = getattr(args, "no_bf16_exempt", False)
+        if dynamic_outlier_layers and no_exempt:
+            # Detection-only mode: record which layers are outliers in the
+            # manifest, but compress them anyway. ARCQuant then fits an
+            # additive residual correction for them at load time. Avoids the
+            # ~3.5 GB cost of exempting 16 experts per layer to protect a few.
+            logger.info(
+                "Mixed precision: DETECTION ONLY (--no-bf16-exempt) - "
+                "%d outlier layers recorded but compressed to W4A4",
+                len(dynamic_outlier_layers),
+            )
+            logger.info("  Outlier layers: %s", sorted(dynamic_outlier_layers))
+            logger.info("  Run build_arcquant_corrections.py against this checkpoint.")
+        elif dynamic_outlier_layers:
             for name, mod in model.named_modules():
                 if not _is_quantized_linear(mod):
                     continue
@@ -1383,7 +1396,11 @@ def run_w4a4(args: Any) -> int:
     # patterns for outlier MoE layers. vLLM reads this to determine which
     # modules use BF16 vs NVFP4 at inference time.
     effective_ignore: list[str] = list(W4A4_IGNORE_PATTERNS)
-    if dynamic_outlier_layers:
+    # Keyed on dynamic_bf16_set (what was ACTUALLY exempted), not
+    # dynamic_outlier_layers (what was merely detected). Under
+    # --no-bf16-exempt the layers are compressed, so listing them as ignored
+    # would make vLLM look for BF16 weights that are not in the checkpoint.
+    if dynamic_bf16_set:
         layer_nums = "|".join(str(i) for i in sorted(dynamic_outlier_layers))
         # Match all submodules within the outlier layers' MLP block
         dynamic_ignore_pattern = f"re:model\\.layers\\.({layer_nums})\\..+"
@@ -1430,7 +1447,7 @@ def run_w4a4(args: Any) -> int:
     # Quantization manifest
     total_bytes = sum(f.stat().st_size for f in output_dir.rglob("*") if f.is_file())
     manifest = {
-        "model": "Zyphra/ZAYA1-8B",
+        "model": "Zyphra/ZAYA1-8B-legacy",
         "quantization": {
             "method": "compressed-tensors",
             "format": "float-quantized",
@@ -1465,10 +1482,19 @@ def run_w4a4(args: Any) -> int:
             "outlier_layers": sorted(dynamic_outlier_layers),
             "bf16_exempted_modules": len(dynamic_bf16_set),
             "w4a4_compressed_modules": linear_count,
+            "arcquant_target": bool(dynamic_outlier_layers) and not dynamic_bf16_set,
             "description": (
-                f"{len(dynamic_outlier_layers)} MoE layers where max_abs > {threshold:.0f} "
-                f"kept at BF16 ({len(dynamic_bf16_set)} Linears). "
-                f"FusedMoE requires uniform quantization per layer."
+                (
+                    f"{len(dynamic_outlier_layers)} MoE layers where max_abs > {threshold:.0f} "
+                    f"kept at BF16 ({len(dynamic_bf16_set)} Linears). "
+                    f"FusedMoE requires uniform quantization per layer."
+                )
+                if dynamic_bf16_set
+                else (
+                    f"{len(dynamic_outlier_layers)} MoE layers where max_abs > {threshold:.0f} "
+                    f"detected but COMPRESSED to W4A4 (--no-bf16-exempt). "
+                    f"Requires ARCQuant residual corrections for accuracy."
+                )
             )
             if dynamic_outlier_layers
             else "disabled",
@@ -1555,13 +1581,24 @@ def run_w4a4(args: Any) -> int:
     else:
         logger.info("W4A4 COMPLETE — NVFP4 W4A4 ZAYA1-8B")
         logger.info("Output: %s (%.1f GB)", output_dir, total_bytes / 1e9)
-        if dynamic_outlier_layers:
+        if dynamic_outlier_layers and bf16_exempted_count:
             logger.info(
                 "Mixed precision: %d outlier layers (%s) kept at BF16 MLP",
                 len(dynamic_outlier_layers),
                 sorted(dynamic_outlier_layers),
             )
             logger.info("  W4A4 modules: %d | BF16 modules: %d", linear_count, bf16_exempted_count)
+        elif dynamic_outlier_layers:
+            logger.info(
+                "Mixed precision: %d outlier layers (%s) COMPRESSED to W4A4 (--no-bf16-exempt)",
+                len(dynamic_outlier_layers),
+                sorted(dynamic_outlier_layers),
+            )
+            logger.info("  W4A4 modules: %d | BF16 modules: 0", linear_count)
+            logger.warning(
+                "  Checkpoint is UNCORRECTED - outlier layers are compressed with no "
+                "mitigation. Run build_arcquant_corrections.py before evaluating quality."
+            )
         logger.info("Next: smoke test with VLLM_NVFP4_GEMM_BACKEND=cutlass to force SM120 CUTLASS")
     logger.info("=" * 60)
     return 0
@@ -1636,6 +1673,20 @@ def main() -> int:
             "Requires the BF16 model (Zyphra/ZAYA1-8B), ~17 GB disk + ~1 GB extra VRAM "
             "per layer for Hessians. Adds ~30%% to calibration time. "
             "Expected accuracy gain: +2 to +4 pts ARC-Easy. Only applies to --scheme w4a4."
+        ),
+    )
+    parser.add_argument(
+        "--no-bf16-exempt",
+        action="store_true",
+        default=False,
+        dest="no_bf16_exempt",
+        help=(
+            "Detect outlier layers and record them in the manifest, but compress "
+            "them to W4A4 anyway instead of exempting them to BF16. Because FusedMoE "
+            "requires uniform quantization per layer, normal exemption costs ~3.5 GB "
+            "to protect ~24 offending Linears. Use this with "
+            "build_arcquant_corrections.py, which fits an additive residual "
+            "correction for the recorded outlier layers. Only applies to --scheme w4a4."
         ),
     )
     parser.add_argument(
@@ -1965,7 +2016,7 @@ def main() -> int:
     # Quantization manifest
     total_bytes = sum(f.stat().st_size for f in output_dir.rglob("*") if f.is_file())
     manifest = {
-        "model": "Zyphra/ZAYA1-8B",
+        "model": "Zyphra/ZAYA1-8B-legacy",
         "quantization": {
             "method": "compressed-tensors",
             "format": "float-quantized",

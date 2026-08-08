@@ -305,7 +305,7 @@ def main() -> None:
         help="Path to W4A4 SOAR checkpoint dir (contains quantization_manifest.json)",
     )
     parser.add_argument(
-        "--bf16-model", default="Zyphra/ZAYA1-8B", help="BF16 reference model (HF hub ID or local path)"
+        "--bf16-model", default="Zyphra/ZAYA1-8B-legacy", help="BF16 reference model (HF hub ID or local path)"
     )
     parser.add_argument(
         "--calibration",

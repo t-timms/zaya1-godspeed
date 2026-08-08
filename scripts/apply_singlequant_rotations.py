@@ -55,7 +55,7 @@ import torch
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_INPUT = "Zyphra/ZAYA1-8B"
+DEFAULT_INPUT = "Zyphra/ZAYA1-8B-legacy"
 GROUP_SIZE = 16  # Must match NVFP4 quantization group size
 
 

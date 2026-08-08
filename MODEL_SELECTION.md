@@ -1,8 +1,58 @@
 # Model Selection — Why ZAYA1-8B for a 16 GB Local Coding Agent
 
-> Survey date: 2026-06-02. Hardware: RTX 5070 Ti, 16 GB, consumer Blackwell (SM120).
-> End goal: drive the [Godspeed coding agent](https://github.com/omnipotence-eth/godspeed-coding-agent)
+> Original survey: 2026-06-02. **Refreshed: 2026-08-08.**
+> Hardware: RTX 5070 Ti, 16 GB, consumer Blackwell (SM120).
+> End goal: drive the [Godspeed coding agent](https://github.com/t-timms/godspeed-coding-agent)
 > locally after the agentic fine-tune lands.
+
+## 2026-08-08 refresh — what the original survey missed
+
+The 2026-06-02 pass omitted two model families that were already public, and
+predated a third development. All sizes below are measured from the published
+Hugging Face artifacts, not estimated.
+
+| Candidate | 4-bit artifact | Size | Fits 16 GB? |
+|---|---|---:|---|
+| **Gemma 4 12B** (`google/gemma-4-12B-it-qat-w4a16-ct`) | official Google **QAT**, compressed-tensors | **10.26 GB** | ✅ ~5.7 GB headroom |
+| **Gemma 4 26B-A4B** (`...-qat-q4_0-gguf`) | official QAT GGUF | **14.44 GB** (+1.19 mmproj) | ⚠️ loads, but ~1.5 GB left — not agent-usable |
+| **Qwen3.6-35B-A3B** (`nvidia/...-NVFP4`) | NVIDIA ModelOpt NVFP4 | **23.4 GB** (3 shards) | ❌ |
+| **ZAYA1-8B** (this project) | compressed-tensors NVFP4 **W4A4** | 9.46 GB | ✅ |
+
+Released 2026-04-15 (Qwen3.6) and 2026-04-02 (Gemma 4), both were available at
+original survey time and should have been evaluated. The verdict does not change
+— neither displaces ZAYA1-8B on a 16 GB card — but the omission is recorded here
+rather than quietly corrected.
+
+> A widely-shared blog claims Qwen3.6-35B-A3B fits a 5070 Ti at 10.88 GB. That
+> figure is for APEX Nano, a different quantization. The NVFP4 export is 23.4 GB.
+
+### The material change: vendors now ship their own quants
+
+Since the original survey, first-party 4-bit releases have become the norm:
+
+- **Zyphra** shipped `ZAYA1-8B-MXFP4-Experts` (5.85 GB) and `ZAYA1-8B-FP8-Experts`
+  on 2026-07-02 — for the very model this project quantizes, and smaller.
+- **Google** shipped QAT `w4a16` compressed-tensors across the Gemma 4 family.
+- **NVIDIA** shipped NVFP4 for Qwen3.6-35B-A3B.
+
+Post-training weight quantization is becoming a commodity. **But every one of
+those first-party releases within a 16 GB budget is weights-only.** Verified from
+config: Zyphra's MXFP4 has `ignore: "re:^(?!.*experts).*$"` and a `weights` block
+with **no `input_activations`**; Google's is `w4a16` by name. NVIDIA's Qwen3.6
+NVFP4 *is* W4A4, but at 23.4 GB it does not fit this card.
+
+**Surviving niche: 4-bit activations inside 16 GB.** That is the claim this
+project should lead with — not "4-bit weights," which is now table stakes.
+
+### Revised triggers
+
+1. **Want a strong general/multimodal local model today, no quantization work:**
+   `google/gemma-4-12B-it-qat-w4a16-ct` — 10.26 GB, official QAT, vision+audio,
+   256K context. Strictly better than hand-quantizing something comparable.
+2. **VRAM upgrade to 24 GB+:** revisit Qwen3.6-35B-A3B NVFP4 (23.4 GB) and
+   Gemma 4 26B-A4B with real KV headroom.
+3. **The W4A4 thesis stays** — no first-party release covers 4-bit activations
+   in this VRAM budget.
 
 ## The binding constraint
 

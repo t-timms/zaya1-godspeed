@@ -29,12 +29,14 @@ from pathlib import Path
 
 os.environ.setdefault("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0")
 
-MODEL = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-w4a4"
+# Repo-relative so the script runs from a clone. Override with --model.
+DEFAULT_MODEL = "./zaya1-8b-nvfp4-w4a4-arcbase"
 ZYPHRA_BF16_PROMPT_STRICT = 0.8558
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default=DEFAULT_MODEL, help="checkpoint path")
     ap.add_argument("--n", type=int, default=None, help="limit to first N prompts (default: all 541)")
     ap.add_argument("--think-budget", type=int, default=2048, dest="think_budget")
     ap.add_argument("--response-max", type=int, default=2048, dest="response_max")
@@ -45,11 +47,11 @@ def main() -> int:
     args = ap.parse_args()
 
     from datasets import load_dataset
-    from lm_eval.tasks.ifeval.utils import InputExample, process_results
+    from lm_eval.tasks.ifeval.utils import process_results
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
 
-    tok = AutoTokenizer.from_pretrained(MODEL)
+    tok = AutoTokenizer.from_pretrained(args.model)
     ds = load_dataset("google/IFEval", split="train")
     if args.n is not None:
         ds = ds.select(range(min(args.n, len(ds))))
@@ -65,7 +67,7 @@ def main() -> int:
     ]
 
     llm = LLM(
-        model=MODEL,
+        model=args.model,
         dtype="bfloat16",
         moe_backend="cutlass",
         gpu_memory_utilization=0.92,
@@ -87,10 +89,7 @@ def main() -> int:
     closed = sum(o.outputs[0].stop_reason == "</think>" for o in think_outs)
 
     # Stage 2: force the end of reasoning, then generate the answer that gets scored.
-    forced_prompts = [
-        base + out.outputs[0].text + "\n</think>\n\n"
-        for base, out in zip(base_prompts, think_outs)
-    ]
+    forced_prompts = [base + out.outputs[0].text + "\n</think>\n\n" for base, out in zip(base_prompts, think_outs)]
     sp_ans = SamplingParams(
         temperature=args.temp,
         top_p=args.top_p,
@@ -134,7 +133,9 @@ def main() -> int:
     print("=" * 72)
     print(f"{'metric':<26} {'ZAYA W4A4':>10} {'BF16 ref':>10}")
     print("-" * 72)
-    print(f"{'prompt_level_strict_acc':<26} {scores['prompt_level_strict_acc'] * 100:>9.1f}% {ZYPHRA_BF16_PROMPT_STRICT * 100:>9.1f}%")
+    print(
+        f"{'prompt_level_strict_acc':<26} {scores['prompt_level_strict_acc'] * 100:>9.1f}% {ZYPHRA_BF16_PROMPT_STRICT * 100:>9.1f}%"
+    )
     print(f"{'prompt_level_loose_acc':<26} {scores['prompt_level_loose_acc'] * 100:>9.1f}% {'—':>10}")
     print(f"{'inst_level_strict_acc':<26} {scores['inst_level_strict_acc'] * 100:>9.1f}% {'—':>10}")
     print(f"{'inst_level_loose_acc':<26} {scores['inst_level_loose_acc'] * 100:>9.1f}% {'—':>10}")
@@ -146,7 +147,7 @@ def main() -> int:
     out_path.write_text(
         json.dumps(
             {
-                "model": MODEL,
+                "model": args.model,
                 "n": len(docs),
                 "think_budget": args.think_budget,
                 "scores": scores,

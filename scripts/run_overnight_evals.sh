@@ -8,13 +8,15 @@
 # there surfaces early in the logs instead of after the long GPQA leg.
 #
 # Launch (from Windows or WSL):
-#   wsl bash "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/scripts/run_overnight_evals.sh"
+#   wsl bash ~/zaya1-godspeed/scripts/run_overnight_evals.sh
 #
 # Everything is logged; safe to disconnect. Results land in results/ (see SUMMARY at end).
 
 set -u  # undefined-var guard; do NOT set -e — one leg failing must not skip the other.
 
-PROJ="/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
+# Resolve the repo from this script's own location - the previous absolute
+# path broke when the repo moved off /mnt/c.
+PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="/home/ttimm/vllm-env/bin/activate"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0

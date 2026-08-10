@@ -25,7 +25,9 @@ import re
 
 os.environ.setdefault("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0")
 
-MODEL = "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed/zaya1-8b-nvfp4-w4a4"
+# Repo-relative so the script runs from a clone. Override with --model;
+# Phase B targets the 6.02 GB uniform checkpoint.
+DEFAULT_MODEL = "./zaya1-8b-nvfp4-w4a4-arcbase"
 
 
 def _preprocess(text: str | None) -> str:
@@ -68,6 +70,8 @@ def extract_letter(continuation: str) -> str | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default=DEFAULT_MODEL, help="checkpoint path")
+    ap.add_argument("--output", default=None, help="write results JSON here")
     ap.add_argument("--n", type=int, default=40, help="number of GPQA-Diamond questions")
     ap.add_argument("--think-budget", type=int, default=2500, dest="think_budget")
     ap.add_argument("--temp", type=float, default=0.6)
@@ -78,7 +82,7 @@ def main() -> int:
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
 
-    tok = AutoTokenizer.from_pretrained(MODEL)
+    tok = AutoTokenizer.from_pretrained(args.model)
     docs = build_docs(args.n)
 
     base_prompts: list[str] = []
@@ -98,7 +102,7 @@ def main() -> int:
         )
 
     llm = LLM(
-        model=MODEL,
+        model=args.model,
         dtype="bfloat16",
         moe_backend="cutlass",
         gpu_memory_utilization=0.92,
@@ -150,7 +154,37 @@ def main() -> int:
     acc = correct / len(docs)
     print(f"accuracy: {correct}/{len(docs)} = {acc * 100:.1f}%")
     print(f"self-closed </think> within budget: {closed_count}/{len(docs)}")
-    print(f"BF16 reference (Zyphra CoT): 71.0%   random: 25.0%")
+    print("BF16 reference (Zyphra CoT): 71.0%   random: 25.0%")
+
+    # Durable artifact: a result that exists only on stdout is lost the moment
+    # the terminal scrolls. Phase A established this the hard way.
+    if args.output:
+        import json
+        from pathlib import Path as _Path
+
+        out = _Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(
+                {
+                    "model": args.model,
+                    "n": len(docs),
+                    "think_budget": args.think_budget,
+                    "max_model_len": args.max_model_len,
+                    "temperature": args.temp,
+                    "top_p": args.top_p,
+                    "seed": 42,
+                    "correct": correct,
+                    "accuracy": acc,
+                    "self_closed_think": closed_count,
+                    "per_question": [
+                        {"gold": g, "pred": p, "correct": ok, "think_tokens": nt} for g, p, ok, nt, _ in rows
+                    ],
+                },
+                indent=2,
+            )
+        )
+        print(f"wrote {out}")
     return 0
 
 

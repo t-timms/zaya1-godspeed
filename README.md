@@ -49,7 +49,8 @@ Everything here was built and debugged on a single RTX 5070 Ti.
 
 | | [`-uniform`](https://huggingface.co/Ttimms/zaya1-8b-nvfp4-w4a4-uniform) | [`zaya1-8b-nvfp4-w4a4`](https://huggingface.co/Ttimms/zaya1-8b-nvfp4-w4a4) |
 |---|---:|---:|
-| Size | **6.02 GB** | 9.46 GB |
+| Weights (`model.safetensors`) | **5.99 GB** | 9.46 GB |
+| Repository total | **6.02 GB** | 9.49 GB |
 | W4A4 Linears | 1,320 | 936 |
 | BF16-exempted | **0** | 384 |
 | HellaSwag `acc` (n=10,042) | 45.79% | **46.49%** |
@@ -58,6 +59,14 @@ Everything here was built and debugged on a single RTX 5070 Ti.
 
 **Use `-uniform`** for maximum KV/context headroom or batching. **Use the 9.46 GB
 build** for best measured accuracy, or to reproduce the control below.
+
+> **On the two size figures.** `6.02 GB` is the uniform build's **whole repository**;
+> `9.46 GB` is the mixed build's **`model.safetensors` alone** (its repository total
+> is 9.49 GB). Both figures are individually correct and both are already published,
+> but they measure different things — so the table above gives each basis
+> explicitly. The reduction holds either way: **−36.7%** on weights, **−36.6%** on
+> repository totals. Measured from the Hub, 2026-08-09.
+
 
 ### Why the exemptions were removable
 

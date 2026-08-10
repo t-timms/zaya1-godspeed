@@ -74,3 +74,4 @@ scripts/verify_switzerchees.py
 
 # Calibration data (large)
 data/calibration/
+zaya1-8b-nvfp4-w4a4-arcbase/

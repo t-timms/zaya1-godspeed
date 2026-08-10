@@ -287,10 +287,154 @@ published BF16 numbers: GPQA-Diamond 71.0%, MMLU-Pro 74.2%, IFEval 85.58%.
 | MR-GPTQ (`--mr-gptq` flag) | ✅ | Column-by-column Hessian correction per-layer during calibration. Adds ~30% to calibration time. Expected: +2-4pp on hard reasoning tasks. Flag exists — not yet benchmarked against Zyphra's suite. |
 | ARC-mix calibration (Session 14) | ✅ | ARC-Easy 15%, ARC-Challenge 10%, HellaSwag 15% added to calibration mix. Current checkpoint re-quantized with this mix + mixed-precision. |
 | Baseline benchmarks — GPQA/MMLU-Pro/IFEval | 🟡 | **IN PROGRESS 2026-05-22.** First run on current mixed-precision checkpoint (no GPTQ). Establishes baseline for the final optimization step. |
-| SingleQuant rotation (ART + URT outlier elimination) | 🔴 | `apply_singlequant_rotations.py` exists but has gamma absorption bug: `gamma_new = R @ gamma` is mathematically wrong (element-wise γ doesn't commute with R). **Fix**: absorb rotation into preceding linear's OUTPUT weights, not LN gamma. Script needs this patch before use. Base model cached in WSL HF cache (`models--Zyphra--ZAYA1-8B`, 17 GB) — no re-download needed. |
+| SingleQuant rotation (ART + URT outlier elimination) | 🔴 | `apply_singlequant_rotations.py` exists but has gamma absorption bug: `gamma_new = R @ gamma` is mathematically wrong (element-wise γ doesn't commute with R). **Fix**: absorb rotation into preceding linear's OUTPUT weights, not LN gamma. Script needs this patch before use. **Session 16 note:** the cached base was deleted in the 2026-07-20 cleanup and re-pulled as `models--Zyphra--ZAYA1-8B-legacy`. Also — the script rotates `fc1`'s **input**, but all 24 outliers are at `linear_fc2`, which its own docstring says it skips (SwiGLU nonlinearity blocks clean rotation of the gate half). Fixing the gamma bug would apply correct math to the wrong tensor. **Deprioritised** — Session 16 removed the exemptions without rotation. |
 | **Final checkpoint: Rotation + GPTQ + mixed-precision** | ⬜ | After baseline benchmarks complete. Fix rotation script → apply rotation (~15 min) → re-quantize with `--mr-gptq --mixed-precision-threshold 1000 --arc-mix` (~25 min) → benchmark (~80 min). Threshold 1000 because rotation suppresses outliers, fewer layers need BF16 exemption. |
 | MoE tuning config (RTX 5070 Ti) | ⬜ | Missing: `E=16,N=2048,device_name=NVIDIA_GeForce_RTX_5070_Ti.json`. Affects TRITON MoE throughput for BF16-exempt layers only. Generate via `python -m vllm.model_executor.layers.fused_moe.benchmark`. Not a blocker for accuracy benchmarks. |
-| ARCQuant residual channels | ⬜ | After final checkpoint benchmarked. |
+| ARCQuant residual channels | ⬜ | **Session 16: still likely unnecessary, premise updated 2026-08-09.** Phase A did find a small regression (−0.71 pp HellaSwag, CI [−1.26, −0.15]), so the earlier "no measurable cost" premise is retired — but the effect is far too small to justify a residual-correction arc, and no other task resolves it. Implementation is complete on both sides (`build_arcquant_corrections.py` + vLLM branch `wip/arcquant-residual-correction`). **Preferred next lever if recovery is ever wanted: ScaleSweep-style bounded FP8 block-scale search** — same mechanism as SOAR, checkpoint-level only, no kernel rebuild. Note the 2026 literature reports Hadamard rotation *hurts* NVFP4, so the rotation arc stays closed. |
+
+
+#### Session 16 — BF16 Exemptions Were Redundant (2026-08-08) 🟡
+
+**Headline: the checkpoint shrank 9.46 GB → 6.02 GB (−36%) for a measured cost of
+−0.71 pp on HellaSwag** (n=10,042, 95% CI [−1.26, −0.15]). The 384 BF16-exempted
+Linears were not earning their 3.44 GB.
+
+> **Claim revised 2026-08-09.** This section originally read "with no measurable
+> accuracy cost," based on a single **unpaired** test on ARC-Easy. That test was
+> underpowered and pointed the wrong way. The paired Phase A suite below
+> supersedes it.
+
+##### Root cause
+
+Outlier *detection* and BF16 *exemption* were coupled in
+`quantize_zaya_ct_nvfp4.py`: any layer with `max_abs > threshold` had its
+entire MLP exempted, because FusedMoE requires uniform quantization per layer.
+24 offending `linear_fc2` modules therefore cost **384** exempted Linears
+(12 layers × 16 experts × 2), a 16× overpay where 16 = `num_experts`.
+The Week-3 estimate of "~200 MB" was correct in principle and off by 17× in
+practice for exactly this reason.
+
+New `--no-bf16-exempt` flag decouples them: outliers are still detected and
+recorded in the manifest, but compressed to W4A4 anyway.
+
+##### Measured results
+
+| Metric | 9.46 GB (384 exempt) | 6.02 GB (0 exempt) | Δ |
+|---|---:|---:|---:|
+| Checkpoint size | 9.46 GB | **6.02 GB** | **−3.44 GB** |
+| W4A4 modules | 936 | 1320 | +384 |
+| BF16-exempted | 384 | **0** | −384 |
+| Outlier layers detected | 12 | 12 | same list |
+| ARC-Easy `acc` (n=2376) | 68.39% ± 0.95 | **70.20% ± 0.94** | +1.81 pp |
+| ARC-Easy `acc_norm` | 68.10% | 67.72% | −0.38 pp |
+| KV cache available | — | **6.83 GiB / 336,835 tok** | — |
+
+**Statistical honesty:** the +1.81 pp ARC-Easy delta is **not significant**
+(z = 1.352, p ≈ 0.18; 95% CI [−0.81, +4.43] pp) and `acc_norm` moves the opposite
+way. ⚠️ **This comparison was also the wrong test.** Comparing two runs'
+aggregate accuracies is an *unpaired* two-proportion test, which discards the
+fact that both checkpoints are quantizations of one base model scored on the
+*same items*. That correlation is exactly what supplies the statistical power.
+The ARC-Easy result should be treated as uninformative, not as support for
+"no measurable cost." See Phase A.
+
+##### Phase A — paired loglikelihood suite (2026-08-09)
+
+Four pure-loglikelihood tasks on **both** checkpoints, identical settings,
+`log_samples=True`, joined per `doc_id`, tested with **exact-binomial McNemar**
+on discordant pairs. 14,319 items per checkpoint. No generation, so the
+`<think>`-never-terminates artifact cannot contaminate these numbers, and no
+chat template (these are ranked-continuation tasks).
+
+| task | metric | n | 6.02 GB | 9.46 GB | Δ pp | 95% CI | b | c | p |
+|---|---|---:|---:|---:|---:|---|---:|---:|---:|
+| hellaswag | acc | 10042 | 45.79% | 46.49% | **−0.71** | [−1.26, −0.15] | 371 | 442 | 0.0140 |
+| hellaswag | acc_norm | 10042 | 60.65% | 61.34% | −0.70 | [−1.39, −0.01] | 587 | 657 | 0.0504 |
+| arc_challenge | acc | 1172 | 37.97% | 36.95% | +1.02 | [−1.42, +3.47] | 113 | 101 | 0.4522 |
+| arc_challenge | acc_norm | 1172 | 37.97% | 40.36% | −2.39 | [−4.97, +0.19] | 105 | 133 | 0.0799 |
+| winogrande | acc | 1267 | 56.20% | 59.04% | −2.84 | [−6.04, +0.36] | 196 | 232 | 0.0906 |
+| piqa | acc | 1838 | 69.42% | 70.02% | −0.60 | [−2.41, +1.21] | 139 | 150 | 0.5564 |
+| piqa | acc_norm | 1838 | 70.89% | 70.08% | +0.82 | [−1.02, +2.65] | 156 | 141 | 0.4166 |
+
+`b` = 6.02 GB correct where 9.46 GB wrong; `c` = the reverse.
+
+**Reading it honestly:**
+
+- **No comparison survives Bonferroni** (α = 0.05/7 = 0.0071). That is *not*
+  proof of no cost — absence of significance is absence of resolution.
+- **HellaSwag is the only adequately powered task** (n=10,042) and its 95% CI
+  **excludes zero**: −0.71 pp [−1.26, −0.15]. Directionally real, practically tiny.
+- **The other three cannot resolve small effects.** Their CIs still admit
+  −4.97 pp (arc_challenge acc_norm) and −6.04 pp (winogrande). Quote the CIs,
+  not the p-values.
+- **5 of 7 comparisons point negative**, consistent with a small real regression
+  that only HellaSwag has the samples to detect.
+
+**Defensible claim:** −0.71 pp on HellaSwag for −36% checkpoint size; smaller
+benchmarks are directionally consistent but underpowered below ~5 pp.
+
+**Method note:** aggregate-only output cannot be salvaged into a paired test
+without re-running the model. Always pass `log_samples=True`. Reproduce with
+`scripts/run_phase_a.py` + `scripts/analyze_phase_a.py` (`phase_a_driver.sh`
+runs both and resumes).
+
+##### Hypothesis
+
+**SOAR likely made the exemptions redundant.** SOAR landed in sessions 9–13,
+*after* mixed-precision exemption was introduced, and directly targets the
+FP8 block-scale rounding error that `max_abs > 500` causes. Two mitigations
+for one problem; the combination was never re-tested. Activation distribution
+on this run: min 3.56 / p25 7.34 / median 14.31 / p75 27.75 / **max 8896**
+(622× median, `L75.experts.1.linear_fc2`).
+
+##### Smoke test — uncorrected checkpoint is coherent
+
+All 4 prompts produced sensible text with 0 BF16 exemptions. No pad-token
+collapse. Mild repetition observed ("Mount Everest is located in…" ×3).
+`CutlassNvFp4LinearKernel` + `VLLM_CUTLASS` MoE backend both engaged.
+Speed 9.7 tok/s at `enforce_eager` — **not** comparable to the 102.6 tok/s
+CUDA-graph figure.
+
+##### Next: Phase A / Phase B
+
+| Phase | Task | Status | Notes |
+|---|---|---|---|
+| A | Paired loglikelihood suite on **both** checkpoints | ⬜ | `hellaswag` (n=10,042, ±0.9 pp), `arc_challenge`, `winogrande`, `piqa`. No generation → cheap + high power. Requires pulling the 9.46 GB checkpoint from HF as the control (Zyphra publishes no HellaSwag/ARC baseline for ZAYA1-8B). **This is the claim that matters.** |
+| B | GPQA-Diamond budget sweep, 6.02 GB checkpoint | ⬜ | n=24 for comparability with the existing 45.8 / 45.8 / 62.5 curve, pushing to **24k and 32k** budgets the old checkpoint could not fit. Tests whether the freed VRAM lifts the reasoning ceiling. Run only if Phase A shows no regression. |
+
+> **Why not GPQA first:** budget-forced GPQA generates up to 12k tokens per
+> question. At n=198 that is ~6–7 h *per checkpoint*; at n=24 the CI is ±19 pp.
+> Generation cost caps statistical power, so GPQA cannot be primary evidence.
+
+##### ARCQuant status change
+
+`build_arcquant_corrections.py` + the vLLM-side runtime support are complete
+but **likely unnecessary** — there is no damage to correct. Preserved on
+vLLM branch `wip/arcquant-residual-correction` (commit `6e2f9c5`). Revisit
+only if Phase A reveals a regression on a harder benchmark.
+
+##### Bugs fixed this session
+
+| Bug | Impact |
+|---|---|
+| `DEFAULT_MODEL = "Zyphra/ZAYA1-8B"` in 4 pipeline scripts | Zyphra refactored that repo to a 40-layer config in late June 2026. Running with defaults would load the **wrong architecture**. Repointed to `Zyphra/ZAYA1-8B-legacy`. 26 further one-off diagnostic scripts still reference the old ID. |
+| config `ignore` list built from `dynamic_outlier_layers` | Should key on `dynamic_bf16_set` (what was *actually* exempted). Under `--no-bf16-exempt` this told vLLM to look for BF16 weights absent from the checkpoint. |
+| Final summary printed "kept at BF16 MLP" alongside "BF16 modules: 0" | Contradictory; now mode-aware and warns when the checkpoint is uncorrected. |
+
+##### Environment state (for resume)
+
+| Item | Location |
+|---|---|
+| Repo | `~/zaya1-godspeed` (WSL native fs — **not** `/mnt/c`, I/O is much faster) |
+| vLLM source build | `~/vllm-src` — **intact**, `cutlass_scaled_fp4_mm_sm120a` compiled 2026-05-15. No rebuild needed. |
+| venv | `~/vllm-env` (torch 2.11.0+cu130, vllm 0.20.2) |
+| BF16 base | HF cache `models--Zyphra--ZAYA1-8B-legacy` (17 GB, 80-layer, verified) |
+| Calibration | `data/calibration/arcmix/calibration_data.pt` (977 × 1024) |
+| New checkpoint | `~/zaya1-godspeed/zaya1-8b-nvfp4-w4a4-arcbase` (6.02 GB, gitignored) |
+| Recovered artifacts | `results/recovered/` (gitignored) — incl. `arc_easy_mse.json`, the n=2376 baseline |
+
+> **Note:** `SESSION_HANDOFF.md` is gitignored and did not survive the
+> 2026-07-20 disk cleanup. This ROADMAP section replaces it.
 
 #### Engineering Cleanup — Session 15 Action Items ⬜
 

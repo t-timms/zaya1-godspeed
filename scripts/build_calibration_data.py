@@ -51,7 +51,7 @@ from typing import Any
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "Zyphra/ZAYA1-8B"
+DEFAULT_MODEL = "Zyphra/ZAYA1-8B-legacy"
 DEFAULT_NUM_SAMPLES = 1024
 DEFAULT_MAX_LENGTH = 1024
 OUTPUT_DIR = Path("data/calibration")

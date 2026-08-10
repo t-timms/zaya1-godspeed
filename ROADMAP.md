@@ -290,13 +290,19 @@ published BF16 numbers: GPQA-Diamond 71.0%, MMLU-Pro 74.2%, IFEval 85.58%.
 | SingleQuant rotation (ART + URT outlier elimination) | 🔴 | `apply_singlequant_rotations.py` exists but has gamma absorption bug: `gamma_new = R @ gamma` is mathematically wrong (element-wise γ doesn't commute with R). **Fix**: absorb rotation into preceding linear's OUTPUT weights, not LN gamma. Script needs this patch before use. **Session 16 note:** the cached base was deleted in the 2026-07-20 cleanup and re-pulled as `models--Zyphra--ZAYA1-8B-legacy`. Also — the script rotates `fc1`'s **input**, but all 24 outliers are at `linear_fc2`, which its own docstring says it skips (SwiGLU nonlinearity blocks clean rotation of the gate half). Fixing the gamma bug would apply correct math to the wrong tensor. **Deprioritised** — Session 16 removed the exemptions without rotation. |
 | **Final checkpoint: Rotation + GPTQ + mixed-precision** | ⬜ | After baseline benchmarks complete. Fix rotation script → apply rotation (~15 min) → re-quantize with `--mr-gptq --mixed-precision-threshold 1000 --arc-mix` (~25 min) → benchmark (~80 min). Threshold 1000 because rotation suppresses outliers, fewer layers need BF16 exemption. |
 | MoE tuning config (RTX 5070 Ti) | ⬜ | Missing: `E=16,N=2048,device_name=NVIDIA_GeForce_RTX_5070_Ti.json`. Affects TRITON MoE throughput for BF16-exempt layers only. Generate via `python -m vllm.model_executor.layers.fused_moe.benchmark`. Not a blocker for accuracy benchmarks. |
-| ARCQuant residual channels | ⬜ | **Session 16: likely unnecessary.** Removing all BF16 exemptions cost no measurable accuracy, so there is no damage to correct. Implementation is complete on both sides (`build_arcquant_corrections.py` + vLLM branch `wip/arcquant-residual-correction`). Revisit only if Phase A shows a regression. |
+| ARCQuant residual channels | ⬜ | **Session 16: still likely unnecessary, premise updated 2026-08-09.** Phase A did find a small regression (−0.71 pp HellaSwag, CI [−1.26, −0.15]), so the earlier "no measurable cost" premise is retired — but the effect is far too small to justify a residual-correction arc, and no other task resolves it. Implementation is complete on both sides (`build_arcquant_corrections.py` + vLLM branch `wip/arcquant-residual-correction`). **Preferred next lever if recovery is ever wanted: ScaleSweep-style bounded FP8 block-scale search** — same mechanism as SOAR, checkpoint-level only, no kernel rebuild. Note the 2026 literature reports Hadamard rotation *hurts* NVFP4, so the rotation arc stays closed. |
 
 
 #### Session 16 — BF16 Exemptions Were Redundant (2026-08-08) 🟡
 
-**Headline: the checkpoint shrank 9.46 GB → 6.02 GB (−36%) with no measurable
-accuracy cost.** The 384 BF16-exempted Linears were not earning their 3.44 GB.
+**Headline: the checkpoint shrank 9.46 GB → 6.02 GB (−36%) for a measured cost of
+−0.71 pp on HellaSwag** (n=10,042, 95% CI [−1.26, −0.15]). The 384 BF16-exempted
+Linears were not earning their 3.44 GB.
+
+> **Claim revised 2026-08-09.** This section originally read "with no measurable
+> accuracy cost," based on a single **unpaired** test on ARC-Easy. That test was
+> underpowered and pointed the wrong way. The paired Phase A suite below
+> supersedes it.
 
 ##### Root cause
 
@@ -323,11 +329,54 @@ recorded in the manifest, but compressed to W4A4 anyway.
 | ARC-Easy `acc_norm` | 68.10% | 67.72% | −0.38 pp |
 | KV cache available | — | **6.83 GiB / 336,835 tok** | — |
 
-**Statistical honesty:** the +1.81 pp accuracy delta is **not significant**
-(z = 1.352, p ≈ 0.18; 95% CI on the difference [−0.81, +4.43] pp), and
-`acc_norm` moves the opposite way. The defensible claim is **"no measurable
-accuracy cost,"** not "better." The CI rules out degradation worse than
-~0.8 pp on this benchmark.
+**Statistical honesty:** the +1.81 pp ARC-Easy delta is **not significant**
+(z = 1.352, p ≈ 0.18; 95% CI [−0.81, +4.43] pp) and `acc_norm` moves the opposite
+way. ⚠️ **This comparison was also the wrong test.** Comparing two runs'
+aggregate accuracies is an *unpaired* two-proportion test, which discards the
+fact that both checkpoints are quantizations of one base model scored on the
+*same items*. That correlation is exactly what supplies the statistical power.
+The ARC-Easy result should be treated as uninformative, not as support for
+"no measurable cost." See Phase A.
+
+##### Phase A — paired loglikelihood suite (2026-08-09)
+
+Four pure-loglikelihood tasks on **both** checkpoints, identical settings,
+`log_samples=True`, joined per `doc_id`, tested with **exact-binomial McNemar**
+on discordant pairs. 14,319 items per checkpoint. No generation, so the
+`<think>`-never-terminates artifact cannot contaminate these numbers, and no
+chat template (these are ranked-continuation tasks).
+
+| task | metric | n | 6.02 GB | 9.46 GB | Δ pp | 95% CI | b | c | p |
+|---|---|---:|---:|---:|---:|---|---:|---:|---:|
+| hellaswag | acc | 10042 | 45.79% | 46.49% | **−0.71** | [−1.26, −0.15] | 371 | 442 | 0.0140 |
+| hellaswag | acc_norm | 10042 | 60.65% | 61.34% | −0.70 | [−1.39, −0.01] | 587 | 657 | 0.0504 |
+| arc_challenge | acc | 1172 | 37.97% | 36.95% | +1.02 | [−1.42, +3.47] | 113 | 101 | 0.4522 |
+| arc_challenge | acc_norm | 1172 | 37.97% | 40.36% | −2.39 | [−4.97, +0.19] | 105 | 133 | 0.0799 |
+| winogrande | acc | 1267 | 56.20% | 59.04% | −2.84 | [−6.04, +0.36] | 196 | 232 | 0.0906 |
+| piqa | acc | 1838 | 69.42% | 70.02% | −0.60 | [−2.41, +1.21] | 139 | 150 | 0.5564 |
+| piqa | acc_norm | 1838 | 70.89% | 70.08% | +0.82 | [−1.02, +2.65] | 156 | 141 | 0.4166 |
+
+`b` = 6.02 GB correct where 9.46 GB wrong; `c` = the reverse.
+
+**Reading it honestly:**
+
+- **No comparison survives Bonferroni** (α = 0.05/7 = 0.0071). That is *not*
+  proof of no cost — absence of significance is absence of resolution.
+- **HellaSwag is the only adequately powered task** (n=10,042) and its 95% CI
+  **excludes zero**: −0.71 pp [−1.26, −0.15]. Directionally real, practically tiny.
+- **The other three cannot resolve small effects.** Their CIs still admit
+  −4.97 pp (arc_challenge acc_norm) and −6.04 pp (winogrande). Quote the CIs,
+  not the p-values.
+- **5 of 7 comparisons point negative**, consistent with a small real regression
+  that only HellaSwag has the samples to detect.
+
+**Defensible claim:** −0.71 pp on HellaSwag for −36% checkpoint size; smaller
+benchmarks are directionally consistent but underpowered below ~5 pp.
+
+**Method note:** aggregate-only output cannot be salvaged into a paired test
+without re-running the model. Always pass `log_samples=True`. Reproduce with
+`scripts/run_phase_a.py` + `scripts/analyze_phase_a.py` (`phase_a_driver.sh`
+runs both and resumes).
 
 ##### Hypothesis
 

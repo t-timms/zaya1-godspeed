@@ -81,6 +81,46 @@ rounding error and landed *after* the mixed-precision decision, so the two
 mitigations were never re-tested together. No residual correction (ARCQuant or
 otherwise) is applied to the uniform checkpoint, and none is required.
 
+### Throughput and memory (measured)
+
+Measured with vLLM's own benchmark CLI, not a bespoke harness:
+
+```bash
+vllm bench latency --model <checkpoint> --dtype bfloat16 --kv-cache-dtype fp8 \
+  --gpu-memory-utilization <frac> --max-model-len 4096 --no-enable-prefix-caching \
+  --input-len 128 --output-len 256 --batch-size 1 --num-iters-warmup 1 --num-iters 3
+```
+
+| | 6.02 GB uniform | 9.46 GB mixed |
+|---|---:|---:|
+| Decode throughput | 104.7 tok/s | 105.3 tok/s |
+| Avg latency, 256 tokens | 2.445 s | 2.430 s |
+| Run-to-run spread (3 iters) | 0.35% | 1.66% |
+| **KV cache** | **156,981 tokens** | 46,802 tokens |
+| `--gpu-memory-utilization` | **0.85** | 0.92 |
+| Weights in VRAM | 5.59 GiB | 8.82 GiB |
+| CUDA graphs | 4.03 GiB | 3.62 GiB |
+
+**Throughput is unchanged.** The 0.6% gap between checkpoints is smaller than the
+1.66% run-to-run spread of the mixed checkpoint alone. Removing the BF16
+exemptions does **not** make the model faster.
+
+**KV cache capacity is 3.35× larger**, and the uniform build achieves that while
+requesting a *smaller* share of the GPU.
+
+**The two cannot be run at the same memory fraction on a 16 GB card.** The mixed
+checkpoint fails at `--gpu-memory-utilization 0.85` with
+`ValueError: No available memory for the cache blocks`, and at `1.0` with
+`Free memory on device cuda:0 (14.66/15.92 GiB) ... less than desired` because a
+desktop session holds ~1.3 GiB. Its working range is narrow; the uniform build
+runs at 0.85 with headroom. This is the practical case for the smaller
+checkpoint — more so than the accuracy difference.
+
+> **Conditions.** Warm compile cache. A cold cache measures the CUDA compiler,
+> not the model: ~198 s first load versus ~58 s warm on the same checkpoint.
+> Single-stream only — the batch-8 figure quoted elsewhere in this repo has not
+> been re-measured with this tool.
+
 ### Paired evaluation
 
 Exact-binomial **McNemar on discordant items**, joined per `doc_id`, 14,319 items

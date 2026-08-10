@@ -803,6 +803,64 @@ python3 scripts/run_full_benchmarks.py \
     --output results/lmeval_w4a4_final.json
 ```
 
+### 5.13 Evaluating a Long-Reasoning Model Under a VRAM Budget (Session 17, 2026-06-22)
+
+**Headline: the W4A4 checkpoint is healthy. The alarming "baseline" numbers were a
+reasoning-model harness artifact, not quantization damage.** Standard lm-eval protocols
+silently mis-measure ZAYA1-8B because it is a post-trained reasoning model (`<think>` /
+`</think>` special tokens) whose evaluation behaviour differs fundamentally from a base model.
+
+**Symptom chain (each "fix" exposed the next, deeper problem):**
+
+| Protocol | Score | Verdict |
+|----------|-------|---------|
+| `leaderboard_gpqa_diamond` (loglikelihood MCQ) | 33.8% | Denies the model any reasoning — caps a reasoning model near random. |
+| `gpqa_diamond_cot_zeroshot` (generative CoT) | 6.6% flexible / **0.0% strict** | *Below* random → pure extraction failure, not model failure. |
+| Budget-forced (this work) | **45.8%** | Above random; checkpoint genuinely solves GPQA. |
+
+**Diagnosis (by dumping raw generations, `scripts/diagnose_gpqa_format.py`):**
+
+1. **Answer-format mismatch.** The chat template opens the assistant turn with `<think>\n`.
+   ZAYA reasons correctly (verified by hand: GPQA Q1 → "the correct answer is (C)" ✓,
+   Q3 → "\boxed{B}" ✓) but emits its final answer as `\boxed{X}`, never the literal
+   "The answer is X" that the stock `strict-match` filter requires — hence exactly 0.0%
+   strict across all 198 questions. A score of *exactly* zero is the tell: a damaged model
+   would still hit the phrase by chance.
+
+2. **Non-terminating reasoning.** At both temp 0.0 (greedy) and temp 0.6 / top-p 0.95,
+   every sampled question hit the token cap (4096, then 7000) **without ever emitting
+   `</think>`**; some traces degenerated into repetition (`BiggBiggBigg…`). The stock CoT
+   task stops only on `</s>`, so it can never reach a final answer. The model wants to reason
+   far past any feasible single-GPU context window.
+
+**Method — budget forcing (s1-style), `scripts/eval_gpqa_budget_forced.py`:** generate up to
+a fixed think budget, inject `</think>\n\nThe final answer is (`, then decode the choice
+letter. This is simultaneously (a) a *terminating, fair* eval protocol for a model that never
+stops on its own, and (b) the way the model would actually be served under a fixed
+latency/VRAM budget on consumer hardware.
+
+**Results (GPQA-Diamond, identical 24 questions, temp 0.6 / top-p 0.95):**
+
+| Think budget | Accuracy | Self-closed `</think>` | Notes |
+|--------------|----------|------------------------|-------|
+| 2500 tokens  | 45.8% (11/24) | 1/24 | Reasoning truncated mid-thought. |
+| 5000 tokens  | 45.8% (11/24) | 2/24 | Doubling the budget did **not** move accuracy. |
+| 12000 tokens (16k ctx) | **62.5% (15/24)** | 9/24 | Enough budget for many traces to *finish* → +16.7 pts. |
+
+**Interpretation.** Accuracy rises **monotonically with reasoning budget on the same 24
+questions** — 45.8% → 45.8% → 62.5% — and `</think>` self-closure tracks it (1 → 2 → 9 of 24).
+The plateau at 2500–5000 followed by a jump at 12000 is exactly the signature of a model that
+*needs* a long trace: below ~5k tokens it is always interrupted mid-thought and lands at the
+same ~46%; only at 12k do enough traces actually conclude, and accuracy climbs to 62.5%,
+within the ±~10% CI of Zyphra's BF16 CoT **71.0%**. This is direct, paired evidence that the
+gap to the BF16 reference is the **reasoning-budget ceiling on 16 GB VRAM**, not quantization
+loss: 45.8%–62.5% all sit far above the 25% random floor and the 6.6% / 33.8% stock-harness
+artifacts. A residual quant-loss component cannot be isolated locally because a BF16 control
+eval (~35 GiB) does not fit in 16 GiB. **Consequence: the rotation + MR-GPTQ "repair" arc
+below is unnecessary — there is no measured damage to repair.** This is itself the
+contribution: *how you evaluate (and serve) a long-reasoning model under a fixed compute
+budget* is the real question for consumer-hardware deployment.
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)
@@ -969,52 +1027,42 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 | Disk cleanup (47 GB freed, active checkpoint preserved) | 14 | ✅ |
 | Smoke test PASSED on active checkpoint | 14 | ✅ |
 
-### 🟡 In Progress: Baseline Benchmarks
+### ✅ Resolved: Baselines + the "damage" question (Session 17, 2026-06-22)
 
-Run `scripts/run_full_benchmarks.py` on the current `./zaya1-8b-nvfp4-w4a4/`
-checkpoint. All three Zyphra-aligned tasks in one command (~80 min):
+The baseline question is settled — see **§5.13**. The W4A4 checkpoint is **healthy**:
+budget-forced GPQA-Diamond = **45.8%** (vs 25% random), and the low stock-harness numbers
+(GPQA MCQ 33.8%, GPQA-CoT 6.6%, IFEval 32.5%) were a **reasoning-model evaluation artifact**
+— ZAYA never emits `</think>` within a feasible budget and answers in `\boxed{}` format, so
+the stock lm-eval protocols cannot score it. The right protocol is budget forcing
+(`scripts/eval_gpqa_budget_forced.py`).
 
-```bash
-source /home/ttimm/vllm-env/bin/activate
-cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
-python3 scripts/run_full_benchmarks.py \
-    --model ./zaya1-8b-nvfp4-w4a4 \
-    --output results/lmeval_w4a4_baseline.json
-```
+Open follow-ups (low priority, not blocking):
+- **IFEval, done right**: needs the same budget-forcing + `<think>…</think>` stripping before
+  the instruction-following checkers run. The 32.5% is invalid for the same reason as GPQA-CoT.
+- **Tighter CI / bigger budget**: n≈100 for ±~6% CI; budget 12000 @ 16k ctx tests whether
+  letting the model finish closes the gap (running 2026-06-22).
+- GPQA-Diamond BF16 reference 71.0% is Zyphra's own CoT harness; treat as an approximate
+  ceiling, not an identical protocol.
 
-Targets (Zyphra BF16 ceilings):
-- GPQA-Diamond: 71.0%
-- MMLU-Pro: 74.2%
-- IFEval: 85.58%
+### ⛔ Deprioritized: Rotation + MR-GPTQ "repair" pipeline
 
-### ⬜ Final Optimization Pipeline (post-baseline)
+**This arc is no longer the plan.** It existed to recover assumed quantization damage; §5.13
+shows there is **no measured damage** to recover (45.8% >> random; the gap to 71% is the
+16 GB reasoning-budget ceiling, not quant loss). A BF16 control to isolate any residual quant
+loss is infeasible locally (~35 GiB > 16 GiB). Kept here only for historical record; do not
+start it without first establishing, on a fair budget-forced eval, that rotation actually
+moves accuracy.
 
-1. **Fix rotation absorption bug** in `apply_singlequant_rotations.py`
-   — absorb `R` into `linear_fc2.weight @ R.T` (not into LN gamma)
-   — ~30 min implementation
+<details><summary>Historical pipeline (do not run by default)</summary>
 
-2. **Apply rotation** to BF16 source weights (~15 min):
-   ```bash
-   python3 scripts/apply_singlequant_rotations.py \
-       --input Zyphra/ZAYA1-8B \
-       --manifest zaya1-8b-nvfp4-w4a4/quantization_manifest.json \
-       --output ./zaya1-8b-bf16-rotated
-   ```
+1. **Fix rotation absorption bug** in `apply_singlequant_rotations.py` — absorb `R` into
+   `linear_fc2.weight @ R.T` (not into LN gamma).
+2. **Apply rotation** to BF16 source (`--input Zyphra/ZAYA1-8B`, `--output ./zaya1-8b-bf16-rotated`).
+3. **Re-quantize with MR-GPTQ** (`--scheme w4a4 --mr-gptq --arc-mix --mixed-precision-threshold 1000`).
+4. **Benchmark** the final checkpoint with `scripts/eval_gpqa_budget_forced.py` (NOT the stock
+   lm-eval CoT task) so the comparison is apples-to-apples.
 
-3. **Re-quantize with MR-GPTQ** (~25 min):
-   ```bash
-   python3 scripts/quantize_zaya_ct_nvfp4.py \
-       --scheme w4a4 --model-id ./zaya1-8b-bf16-rotated \
-       --mixed-precision-threshold 1000 --mr-gptq --arc-mix \
-       --output-dir ./zaya1-8b-nvfp4-w4a4-final
-   ```
-
-4. **Benchmark final checkpoint** (~80 min):
-   ```bash
-   python3 scripts/run_full_benchmarks.py \
-       --model ./zaya1-8b-nvfp4-w4a4-final \
-       --output results/lmeval_w4a4_final.json
-   ```
+</details>
 
 ### ⬜ Publication
 

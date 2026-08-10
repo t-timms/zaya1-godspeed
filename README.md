@@ -8,8 +8,11 @@
 
 **NVFP4 W4A4 inference for Zyphra's ZAYA1-8B on consumer Blackwell (RTX 5070 Ti, SM120)** —
 4-bit weights *and* 4-bit activations running on native CUTLASS FP4 tensor-core kernels,
-at **102.6 tok/s single-stream / 407.4 tok/s batch-8** from a 9.46 GB mixed-precision
-checkpoint, within a 16 GB VRAM budget.
+at **102.6 tok/s single-stream / 407.4 tok/s batch-8**, within a 16 GB VRAM budget.
+
+Two checkpoints are published: a **6.02 GB** fully-uniform build and a **9.46 GB**
+mixed-precision build. The difference between them has been measured with a paired
+test over 14,319 items — see [Checkpoints](#checkpoints).
 
 One other public NVFP4 W4A4 ZAYA1 checkpoint exists — built with NVIDIA ModelOpt
 and validated on a 96 GB workstation Blackwell card, with no published accuracy or
@@ -24,7 +27,8 @@ Everything here was built and debugged on a single RTX 5070 Ti.
 | Result | Detail |
 |--------|--------|
 | **102.6 tok/s** single / **407.4 tok/s** batch-8 | vLLM + CUDA graphs on RTX 5070 Ti (12.8× over eager mode) |
-| **9.46 GB checkpoint** | 936 Linears in packed NVFP4 W4A4, 384 outlier-sensitive Linears kept BF16 (mixed precision) — the BF16 exemptions are why this is larger than a uniformly-quantized NVFP4 export |
+| **6.02 GB / 9.46 GB checkpoints** | Uniform build: all 1,320 Linears packed NVFP4 W4A4, zero BF16 exemptions. Mixed build: 936 W4A4 + 384 outlier-sensitive Linears kept BF16. The exemptions cost 3.44 GB and buy 0.71 pp of HellaSwag |
+| **−36% size for −0.71 pp** | Removing all BF16 exemptions costs 0.71 pp on HellaSwag (n=10,042, 95% CI [−1.26, −0.15], paired McNemar). Measured, not assumed — the first attempt used an unpaired test and got the sign wrong |
 | **Checkpoint verified healthy** | Budget-forced GPQA-Diamond rises monotonically with reasoning budget — 45.8% → 62.5% at a 12k-token think budget vs Zyphra's BF16 CoT 71.0%. At n=24 the confidence interval is wide (~±19 pts), so treat this as a health signal, not a parity claim |
 | **First ZAYA1-8B GGUF** | 4.76 GB NVFP4 GGUF (4.52 bpw), built early May 2026 against a patched llama.cpp — community GGUFs appeared later via [llama.cpp PR #23112](https://github.com/ggml-org/llama.cpp/pull/23112) |
 | **vLLM SM120 source build** | `TORCH_CUDA_ARCH_LIST=12.0` build enabling `cutlass_scaled_fp4_mm_sm120a` + FP4 group MoE GEMM — kernels that ship in vLLM source but not in wheels |
@@ -40,6 +44,68 @@ Everything here was built and debugged on a single RTX 5070 Ti.
 > 262272), so this reads as a re-expression of the same model rather than a new
 > one — but **reproduce against `Zyphra/ZAYA1-8B-legacy`**, not current
 > `ZAYA1-8B`, or the scripts here will hit an architecture mismatch.
+
+## Checkpoints
+
+| | [`-uniform`](https://huggingface.co/Ttimms/zaya1-8b-nvfp4-w4a4-uniform) | [`zaya1-8b-nvfp4-w4a4`](https://huggingface.co/Ttimms/zaya1-8b-nvfp4-w4a4) |
+|---|---:|---:|
+| Size | **6.02 GB** | 9.46 GB |
+| W4A4 Linears | 1,320 | 936 |
+| BF16-exempted | **0** | 384 |
+| HellaSwag `acc` (n=10,042) | 45.79% | **46.49%** |
+| HellaSwag `acc_norm` | 60.65% | **61.34%** |
+| KV cache on 16 GB | **6.83 GiB / ~336k tok** | materially less |
+
+**Use `-uniform`** for maximum KV/context headroom or batching. **Use the 9.46 GB
+build** for best measured accuracy, or to reproduce the control below.
+
+### Why the exemptions were removable
+
+Only **24** `linear_fc2` modules have calibrated activation `max_abs > 500` (worst:
+8,896 at `L75.experts.1.linear_fc2`, 622× the median). But **FusedMoE requires
+uniform quantization per layer**, so protecting them forced exempting `fc1` *and*
+`fc2` across all 16 experts in each affected layer — **384 Linears, 3.44 GB.** A
+16× overpay, where 16 is `num_experts`.
+
+They turned out to be largely redundant: SOAR targets the same FP8 block-scale
+rounding error and landed *after* the mixed-precision decision, so the two
+mitigations were never re-tested together. No residual correction (ARCQuant or
+otherwise) is applied to the uniform checkpoint, and none is required.
+
+### Paired evaluation
+
+Exact-binomial **McNemar on discordant items**, joined per `doc_id`, 14,319 items
+per checkpoint, four pure-loglikelihood tasks. No generation, so this is immune to
+the `<think>`-never-terminates artifact; no chat template, since these are
+ranked-continuation tasks.
+
+| task | metric | n | 6.02 GB | 9.46 GB | Δ pp | 95% CI | p |
+|---|---|---:|---:|---:|---:|---|---:|
+| hellaswag | acc | 10,042 | 45.79% | 46.49% | **−0.71** | [−1.26, −0.15] | 0.0140 |
+| hellaswag | acc_norm | 10,042 | 60.65% | 61.34% | −0.70 | [−1.39, −0.01] | 0.0504 |
+| arc_challenge | acc | 1,172 | 37.97% | 36.95% | +1.02 | [−1.42, +3.47] | 0.4522 |
+| arc_challenge | acc_norm | 1,172 | 37.97% | 40.36% | −2.39 | [−4.97, +0.19] | 0.0799 |
+| winogrande | acc | 1,267 | 56.20% | 59.04% | −2.84 | [−6.04, +0.36] | 0.0906 |
+| piqa | acc | 1,838 | 69.42% | 70.02% | −0.60 | [−2.41, +1.21] | 0.5564 |
+| piqa | acc_norm | 1,838 | 70.89% | 70.08% | +0.82 | [−1.02, +2.65] | 0.4166 |
+
+> **Read the intervals, not the p-values.** Nothing survives Bonferroni
+> (α = 0.05/7 = 0.0071) — but that is absence of *resolution*, not evidence of
+> absence. HellaSwag is the only adequately powered task and its CI excludes zero;
+> the smaller benchmarks still admit −4.97 pp (arc_challenge `acc_norm`) and
+> −6.04 pp (winogrande). Five of seven comparisons point negative.
+>
+> **Defensible claim: −0.71 pp on HellaSwag for −36% size.** Nothing stronger.
+
+The first attempt at this comparison used ARC-Easy and an **unpaired**
+two-proportion test, which reported +1.81 pp in favour of the smaller checkpoint
+at p=0.18. Both checkpoints are quantizations of one base model scored on the same
+items; discarding that pairing discards the power. Aggregate accuracy output
+cannot be converted into a paired test after the fact — it needs per-item logging
+(`log_samples=True`) from the start.
+
+Reproduce: `scripts/phase_a_driver.sh` (runs both checkpoints and resumes), or
+`scripts/run_phase_a.py` + `scripts/analyze_phase_a.py` individually.
 
 ## Why this is hard
 

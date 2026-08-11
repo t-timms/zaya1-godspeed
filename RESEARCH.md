@@ -1044,6 +1044,79 @@ Open follow-ups (low priority, not blocking):
 - GPQA-Diamond BF16 reference 71.0% is Zyphra's own CoT harness; treat as an approximate
   ceiling, not an identical protocol.
 
+### 🔴 Open: Decode throughput regression (Session 18, 2026-08-10)
+
+Full benchmark pass over both published checkpoints under one pipeline, standard
+tooling only, conditions recorded per run. Artifacts under `bench/2026-08-10*`.
+
+**Accuracy reproduced and is now tightly bounded.** Paired exact-binomial McNemar
+on discordant items, joined per `doc_id` with `doc_hash` verification that both
+runs scored identical items, 15,523 items across four loglikelihood tasks, no chat
+template:
+
+| task | n | mixed | uniform | delta | 95% CI | p |
+|---|---:|---:|---:|---:|---|---:|
+| hellaswag | 10,042 | 61.18% | 61.09% | −0.09 pp | [−0.76, +0.58] | 0.82 |
+| arc_easy | 2,376 | 67.72% | 67.42% | −0.29 pp | [−1.90, +1.31] | 0.76 |
+| piqa | 1,838 | 69.26% | 70.29% | +1.03 pp | [−0.89, +2.96] | 0.32 |
+| winogrande | 1,267 | 57.14% | 57.77% | +0.63 pp | [−2.50, +3.76] | 0.73 |
+
+Signs are mixed and every p > 0.3. HellaSwag is well-powered enough that the
+interval excludes any effect beyond ~0.8 pp — a bound, not an underpowered null.
+The smaller tasks cannot exclude ~±3 pp; quote HellaSwag as the evidence.
+
+⚠️ This compares **uniform vs mixed**, not uniform vs BF16. Chaining it to the
+earlier −0.71 pp BF16 result to produce a cumulative figure would be arithmetic
+across two experiments, not a measurement.
+
+**Decode throughput did not reproduce.** Re-running the command documented in the
+README, both checkpoints, idle machine:
+
+| | published (session 8 era) | 2026-08-10 | ratio |
+|---|---:|---:|---:|
+| uniform | 104.7 tok/s / 2.445 s | 9.6 tok/s / 26.634 s | 10.9× slower |
+| mixed | 105.3 tok/s / 2.430 s | 8.5 tok/s / 30.117 s | 12.4× slower |
+
+Run-to-run spread 0.21% / 0.33% — tighter than the original 0.35% / 1.66%, so the
+new measurement is clean. `TPOT` under load is 101–114 ms against the ~9.5 ms the
+published figures imply, and per-token cost stays ~100 ms with and without
+`--kv-cache-dtype fp8`. Both checkpoints slowed by a near-identical factor ⇒ the
+stack, not the checkpoints.
+
+*Ruled out:* thermal/power throttling (42 °C, 53 W of 300 W, all throttle reasons
+inactive) and GPU contention. Contention was real in a first attempt — an animated
+wallpaper renderer produced a 181% spread (15.5 / 17.4 / 43.5 s) — but eliminating
+it collapsed the spread to 0.2% **without moving the level**.
+
+*Leading hypothesis:* stack regression. The engine log shows
+`trtllm::fused_moe::gemm2` skipping **all ten** autotuner tactics as unsupported;
+a MoE GEMM with no viable tactic falls back to a generic path, which is a fixed
+per-step cost and therefore batch-independent — exactly the observed shape.
+Prefill is unaffected at 11,909 tok/s. Independent corroboration that consumer
+Blackwell MoE support is thin: [hand-written SM120 SASS MoE kernels for vLLM](https://github.com/kacper-daftcode/vllm-Moet)
+exist for this reason, and published RTX 5090 figures put llama.cpp at 185–213
+tok/s against vLLM's 83 for 8B models at batch 1.
+
+**Revised: the checkpoints are not equal on throughput.** Under equal conditions
+uniform is faster — +13% at batch 1, and +67% on offline throughput measured with
+3 **interleaved** reps (690.5 ± 1.7 vs 413.8 ± 9.9 output tok/s, all reps agreeing
+in sign). Interleaving matters: blocked runs let thermal drift and run order
+masquerade as a checkpoint difference. The mixed checkpoint is additionally not
+reproducible run-to-run — a single-shot 828.8 tok/s reading did not survive
+replication, while uniform replicated to within 0.7%.
+
+**Method notes worth keeping.**
+
+- A first pass declared non-reproduction *without running the documented command* —
+  a different workload (512/128, no fp8 KV cache, prefix caching on) was compared
+  against 128/256 fp8 numbers. That is a different experiment, not a failed
+  reproduction. **Run the published command first.**
+- Cold CUDA compile cache cost 12 m 31 s versus 2 m 43 s warm. Timing a cold cache
+  measures the compiler.
+- Judge stage success by artifact content, not exit code: vLLM can abort at teardown
+  after writing a valid result. An arbitrary 200-byte size floor also rejected a
+  perfectly valid 188-byte result JSON — validate that it parses instead.
+
 ### ⛔ Deprioritized: Rotation + MR-GPTQ "repair" pipeline
 
 **This arc is no longer the plan.** It existed to recover assumed quantization damage; §5.13

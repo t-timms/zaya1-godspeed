@@ -8,7 +8,17 @@
 
 **NVFP4 W4A4 inference for Zyphra's ZAYA1-8B on consumer Blackwell (RTX 5070 Ti, SM120)** —
 4-bit weights *and* 4-bit activations running on native CUTLASS FP4 tensor-core kernels,
-at **102.6 tok/s single-stream / 407.4 tok/s batch-8**, within a 16 GB VRAM budget.
+within a 16 GB VRAM budget.
+
+> ⚠️ **Throughput figures are under re-measurement (2026-08-10).** The decode
+> numbers previously headlined here do **not** reproduce on the current stack. Re-running
+> this repo's own documented command on a quiet machine now yields **9.6 tok/s**
+> (uniform) and **8.5 tok/s** (mixed) against the 104.7 / 105.3 tok/s recorded below —
+> roughly 11×. Run-to-run spread today is 0.2–0.33%, so this is a clean measurement,
+> not noise. Cause is unresolved: most likely a regression in the inference stack
+> since the original measurement, possibly an error in the original. See
+> [Throughput and memory](#throughput-and-memory-measured). **Accuracy results are
+> unaffected** — they are re-verified below.
 
 Two checkpoints are published: a **6.02 GB** fully-uniform build and a **9.46 GB**
 mixed-precision build. The difference between them has been measured with a paired
@@ -26,7 +36,7 @@ Everything here was built and debugged on a single RTX 5070 Ti.
 
 | Result | Detail |
 |--------|--------|
-| **102.6 tok/s** single / **407.4 tok/s** batch-8 | vLLM + CUDA graphs on RTX 5070 Ti (12.8× over eager mode) |
+| ⚠️ Decode throughput **under re-measurement** | Previously headlined as 102.6 tok/s single / 407.4 tok/s batch-8. Does not reproduce on the current stack (2026-08-10): 9.6 / 8.5 tok/s from this repo's own command, 0.2% spread. Unresolved — see the [note above](#zaya1-godspeed) |
 | **6.02 GB / 9.46 GB checkpoints** | Uniform build: all 1,320 Linears packed NVFP4 W4A4, zero BF16 exemptions. Mixed build: 936 W4A4 + 384 outlier-sensitive Linears kept BF16. The exemptions cost 3.44 GB and buy 0.71 pp of HellaSwag |
 | **−36% size for −0.71 pp** | Removing all BF16 exemptions costs 0.71 pp on HellaSwag (n=10,042, 95% CI [−1.26, −0.15], paired McNemar). Measured, not assumed — the first attempt used an unpaired test and got the sign wrong |
 | **Checkpoint verified healthy** | Budget-forced GPQA-Diamond rises monotonically with reasoning budget — 45.8% → 62.5% at a 12k-token think budget vs Zyphra's BF16 CoT 71.0%. At n=24 the confidence interval is wide (~±19 pts), so treat this as a health signal, not a parity claim |
@@ -101,9 +111,46 @@ vllm bench latency --model <checkpoint> --dtype bfloat16 --kv-cache-dtype fp8 \
 | Weights in VRAM | 5.59 GiB | 8.82 GiB |
 | CUDA graphs | 4.03 GiB | 3.62 GiB |
 
-**Throughput is unchanged.** The 0.6% gap between checkpoints is smaller than the
-1.66% run-to-run spread of the mixed checkpoint alone. Removing the BF16
-exemptions does **not** make the model faster.
+> ### ⚠️ Re-measurement, 2026-08-10 — these numbers do not currently reproduce
+>
+> Re-running the exact command above, on the same two checkpoints, on an idle
+> machine:
+>
+> | | 6.02 GB uniform | 9.46 GB mixed |
+> |---|---:|---:|
+> | Avg latency, 256 tokens | **26.634 s** | **30.117 s** |
+> | Decode throughput | **9.6 tok/s** | **8.5 tok/s** |
+> | Run-to-run spread (3 iters) | 0.21% | 0.33% |
+> | vs. figure recorded above | 10.9× slower | 12.4× slower |
+>
+> The spread is *tighter* than the original run, so this is not measurement noise.
+> Both checkpoints are affected by a near-identical factor, which points at the
+> inference stack rather than at anything about the checkpoints. Per-token cost is
+> ~100 ms under every configuration tried, with and without `--kv-cache-dtype fp8`;
+> the figures above imply ~9.5 ms/token.
+>
+> **Two candidate explanations, unresolved:** a regression in vLLM / flashinfer /
+> driver / CUDA since the original measurement (this repo's stack has moved from
+> CUDA 13.0 to vLLM `0.20.2+cu132`, driver 610.88), or an error in the original
+> measurement. The engine log shows `trtllm::fused_moe::gemm2` skipping all ten
+> autotuner tactics as unsupported, which would produce exactly this shape — a
+> large, stable, batch-independent per-step penalty.
+>
+> **Ruled out:** thermal or power throttling (42 °C, 53 W of 300 W, no throttle
+> reasons active) and GPU contention. Contention *was* present in a first attempt —
+> an animated wallpaper renderer produced a 181% run-to-run spread — but removing it
+> collapsed the spread to 0.2% **without changing the level**.
+>
+> **Also revised by this run:** the claim below that throughput is unchanged between
+> checkpoints. Under the same command the uniform build is now 13% faster at batch 1,
+> and in a separate interleaved 3-rep offline throughput test it was 67% faster
+> (690.5 ± 1.7 vs 413.8 ± 9.9 output tok/s). The mixed checkpoint also proved
+> **not reproducible run-to-run** in that test — a single-shot reading of 828.8 tok/s
+> did not survive replication.
+
+**Throughput is unchanged.** *(Superseded — see the re-measurement above.)* The 0.6%
+gap between checkpoints is smaller than the 1.66% run-to-run spread of the mixed
+checkpoint alone. Removing the BF16 exemptions does **not** make the model faster.
 
 **KV cache capacity is 3.35× larger**, and the uniform build achieves that while
 requesting a *smaller* share of the GPU.

@@ -616,6 +616,39 @@ dedicated agentic RL at scale. This is a first cycle.
 
 ---
 
+## Inference Performance — open regression (2026-08-10) 🔴
+
+A full benchmark pass over both published checkpoints, using standard tooling only
+(`vllm bench latency|throughput|serve`, lm-eval-harness), under recorded conditions.
+
+**What reproduced.** Accuracy. Paired McNemar over 15,523 items, four
+loglikelihood tasks, `doc_hash`-verified item matching: uniform vs mixed is
+**−0.09 pp on HellaSwag, 95% CI [−0.76, +0.58], p=0.82**, with arc_easy, piqa and
+winogrande all non-significant and mixed in sign. HellaSwag at n=10,042 is
+genuinely well-powered — this is a tight bound, not an underpowered null.
+
+**What did not.** Decode throughput, by ~11×, using this repo's own documented
+command on an idle machine at 0.2% run-to-run spread. Both checkpoints affected
+near-identically ⇒ the stack, not the models. Details in the README.
+
+**What changed in the comparison.** Under equal conditions the uniform build is
+*faster*, not equal: +13% at batch 1, +67% on interleaved offline throughput
+(690.5 ± 1.7 vs 413.8 ± 9.9 output tok/s, n=3, all reps agreeing in sign). The
+mixed checkpoint is additionally **not reproducible run-to-run** on throughput.
+
+### Next, in order
+
+| # | Task | Why |
+|---|------|-----|
+| 1 | **Benchmark regression harness** — pinned baseline, tolerance, schedule | The gap that let this go unnoticed. vLLM runs its own [performance dashboard](https://docs.vllm.ai/en/latest/benchmarking/dashboard/) for the same reason. Record exact commit hashes, not version strings — this is a source build |
+| 2 | **llama.cpp cross-check** on the same checkpoint | Decides whether the ~11× is vLLM's MoE path on SM120 or the hardware. Published RTX 5090 figures put llama.cpp at 185–213 tok/s vs vLLM at 83 for 8B models, so vLLM is known-weak at batch-1 decode on this generation. A GGUF already exists |
+| 3 | **Bisect the stack** if llama.cpp is fast | vLLM / flashinfer / driver / CUDA all moved. `trtllm::fused_moe::gemm2` skipping all ten autotuner tactics is the leading suspect; [hand-written SM120 SASS MoE kernels](https://github.com/kacper-daftcode/vllm-Moet) exist because stock consumer-Blackwell MoE support is limited |
+| 4 | **Prometheus + Grafana** (vLLM dashboard ID 24756) | Percentiles and history during runs, instead of reading a live widget |
+| 5 | Republish throughput claims | Only after 1–3 close |
+
+**Do not publish any throughput number until item 1 exists.** The failure mode was
+not a wrong measurement; it was having no way to notice the measurement had gone stale.
+
 ## Pipeline Architecture
 
 ```
@@ -652,7 +685,9 @@ vLLM serve (evaluation) → Godspeed 20-task benchmark → BFCL-v4
 | Shopify OOD failure mode | Good benchmarks, bad real usage | 30% OOD tasks minimum. Mutate before generation, not after. |
 | Teacher format hallucination | DeepSeek V4 generates invalid tool calls | Godspeed's schema validator catches these at runtime. Filter during remapping. |
 | Benchmark leakage | SWE-bench tasks overlap with training data | Cross-check tasks.jsonl against SWE-bench Verified task IDs before release eval. |
-| No GGUF / llama.cpp support | Can't use spec decoding or local llama.cpp server | vLLM is the only viable local path |
+| ~~No GGUF / llama.cpp support~~ **(stale)** | — | Outdated: a 4.76 GB NVFP4 GGUF was built early May 2026 against a patched llama.cpp, and community GGUFs landed via [llama.cpp PR #23112](https://github.com/ggml-org/llama.cpp/pull/23112). llama.cpp is a viable second backend and is now wanted as a cross-check — see *Inference Performance* below |
+| **Decode throughput regression (open)** | Published tok/s figures do not reproduce; any performance claim is unsafe to quote | Re-measured 2026-08-10 at ~11× below published, 0.2% spread. Root cause unresolved. No throughput claim should be published until closed |
+| No performance regression detection | A stack upgrade can silently invalidate published numbers, and did | Build a scheduled benchmark-vs-baseline harness. This is the top priority below |
 | Zyphra fork required | Extra build step for both transformers and vLLM | One-time setup, documented |
 | 16 GB VRAM ceiling | ~24K context max, limited batch size | Adequate for agent loop (single sequence) |
 

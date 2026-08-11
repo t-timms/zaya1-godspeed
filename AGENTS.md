@@ -166,6 +166,37 @@ Before claiming something works:
 3. If training: run a dry-run batch (forward + backward pass) before full run
 4. If deployment: verify health endpoint responds before reporting success
 
+### 🔴 FIRST: the SM120 FP4 MoE kernel path is numerically broken
+
+**Before diagnosing ANY output or performance problem, rule this out.** vLLM
+auto-selects `flashinfer_cutlass` for FP4 MoE on SM120, and that path produces
+**numerically wrong results** on consumer Blackwell. Confirmed 2026-08-11 on
+RTX 5070 Ti, vLLM `0.20.2+cu132`: greedy decoding returned `"ssngthssystem"`, while
+`enforce_eager=True` on the identical weights returned coherent, on-topic text.
+
+Symptom cluster — any of these means suspect the kernel, not the checkpoint:
+- garbage or empty completions, **worse at greedy than at sampling**
+- loglikelihood evals scoring fine (~61% HellaSwag) while generation is broken —
+  multiple-choice **cannot detect this**
+- throughput nondeterministic across launches (measured **3.4×** on identical commands)
+- CUDA graph pool varying run to run (0.68 vs 1.84 GiB)
+- `trtllm::fused_moe::gemm2` skipping **10 of 10** autotuner tactics
+
+**Fix: `--moe-backend marlin`** (upstream-recommended for SM120), or
+`enforce_eager=True` (correct, slower), or the FlashInfer SM120 + `compute_120f`
+patches from [CUTLASS #3096](https://github.com/NVIDIA/cutlass/issues/3096).
+
+**Already documented upstream — do not file a duplicate:** CUTLASS #3096,
+FlashInfer #2723 / #3537, vLLM #38718 / #47365 / #50084.
+
+**Diagnostic rule: before concluding a checkpoint is damaged, re-run one prompt
+with `enforce_eager=True`.** Thirty seconds. Months of "is the checkpoint healthy"
+work proceeded without it.
+
+**Add IFEval to the eval suite.** Every accuracy task used here is loglikelihood,
+which measures *ranking* and never *producing*. That is the blind spot that let a
+broken generation path be called healthy.
+
 ### Benchmarking Protocol (CRITICAL — every rule here was learned by breaking it)
 
 **Batch-1 decode throughput on this hardware is not reproducible from a single

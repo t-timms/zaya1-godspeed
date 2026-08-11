@@ -165,3 +165,39 @@ Before claiming something works:
 2. Check against the source documentation for correctness
 3. If training: run a dry-run batch (forward + backward pass) before full run
 4. If deployment: verify health endpoint responds before reporting success
+
+### Benchmarking Protocol (CRITICAL — every rule here was learned by breaking it)
+
+**Batch-1 decode throughput on this hardware is not reproducible from a single
+run.** Measured 2026-08-10: 9.6 / 32.2 / 23.7 tok/s across three invocations of
+the *identical* command on an idle machine, each internally tight. **A 3.4×
+range.** Suspected cause is FlashInfer MoE autotuner tactic selection, which is
+decided per process and then frozen into CUDA graphs
+([flashinfer#3537](https://github.com/flashinfer-ai/flashinfer/issues/3537)).
+
+1. **Never publish a throughput number from one run.** Median of ≥5 process
+   invocations, and report the range. Within-run spread is *not* evidence of
+   reliability — a run can spread 0.21% and still be 3× off the next one.
+2. **To reproduce a published number, run the published command.** Running a
+   different workload and comparing is a different experiment, not a failed
+   reproduction. This mistake produced a false "does not reproduce" conclusion.
+3. **Close GPU consumers first.** Wallpaper Engine, browsers, Steam. An animated
+   wallpaper polls at 0–1% utilisation while still inflating run-to-run spread
+   from 0.2% to 181%. **Instantaneous utilisation does not detect it** — guard on
+   the measured spread instead, and reject any run spreading >3%.
+4. **Warm the compile cache in a separate, unmeasured stage.** Cold was 12m31s vs
+   2m43s warm; a cold-cache timing measures the CUDA compiler.
+5. **Judge success by artifact content, not exit code.** vLLM can abort at
+   teardown *after* writing a valid result. Validate the JSON parses — do not
+   apply a size threshold (a 200-byte floor rejected a valid 188-byte result).
+6. **Interleave A/B reps** (A,B,A,B…), never blocked. Blocked runs let thermal
+   drift and run order masquerade as the effect being measured.
+7. **Accuracy comparisons between checkpoints are PAIRED.** Use `--log_samples`,
+   join per `doc_id`, verify `doc_hash` matches so both runs provably scored the
+   same items, then McNemar on discordant pairs. Comparing aggregate accuracies
+   discards the pairing and wastes the run.
+8. **Record the environment fingerprint per run** — vLLM *commit* (this is a
+   source build; the version string is insufficient), flashinfer, torch, driver,
+   CUDA. A stack change with unchanged throughput still invalidates prior claims.
+
+Tooling implementing all of this lives in the user's `~/scripts/bench-*`.

@@ -1044,7 +1044,43 @@ Open follow-ups (low priority, not blocking):
 - GPQA-Diamond BF16 reference 71.0% is Zyphra's own CoT harness; treat as an approximate
   ceiling, not an identical protocol.
 
-### 🔴 Open: Decode throughput regression (Session 18, 2026-08-10)
+### 🔴 RESOLVED, and it invalidates the section below (Session 18b, 2026-08-11)
+
+**CUDA graph capture computes numerically incorrect results for this model on
+SM120.** The throughput regression documented below, the 3.4× run-to-run variance,
+and very likely several older "is the checkpoint damaged" threads all trace to this.
+
+Backend sweep, greedy, *"Name three primary colors"*:
+
+| backend | CUDA graphs on |
+|---|---|
+| flashinfer_cutlass (default) | GARBAGE |
+| cutlass | GARBAGE |
+| marlin — *weight-only* | **GARBAGE** |
+| flashinfer_trtllm / cutedsl / triton / emulation | will not initialise |
+| **default + `enforce_eager=True`** | ✅ **coherent, on-topic** |
+
+`marlin` dequantizes to weight-only and barely exercises the FP4 MoE path, yet
+fails identically. Three independent compute paths are wrong with capture enabled;
+the same path is correct with it disabled. **The defect is graph capture, not the
+FP4 kernels, and not the checkpoint.**
+
+**Consequences.** Every throughput figure below is void. The paired McNemar
+comparison between checkpoints is void — it compared two models through corrupted
+arithmetic. The accuracy scores in §12 were also produced on this path and must be
+re-run; they may improve.
+
+**The process failure.** Every accuracy task in this project is loglikelihood —
+HellaSwag, ARC-Easy, PIQA, WinoGrande — which scores *pre-written continuations*.
+It measures ranking, never generation. A model that could not produce a coherent
+sentence scored **61.18% on HellaSwag** and was repeatedly certified healthy.
+**IFEval** (≈500 prompts, automatically verifiable constraints, already in
+lm-eval-harness, existing BF16 reference of 85.58%) is required in the suite.
+
+**Diagnostic rule going forward:** before concluding a checkpoint is damaged,
+re-run one prompt with `enforce_eager=True`. Thirty seconds.
+
+### ⛔ Void: Decode throughput regression (Session 18, 2026-08-10)
 
 Full benchmark pass over both published checkpoints under one pipeline, standard
 tooling only, conditions recorded per run. Artifacts under `bench/2026-08-10*`.

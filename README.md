@@ -10,15 +10,45 @@
 4-bit weights *and* 4-bit activations running on native CUTLASS FP4 tensor-core kernels,
 within a 16 GB VRAM budget.
 
-> ⚠️ **Throughput figures are under re-measurement (2026-08-10).** The decode
-> numbers previously headlined here do **not** reproduce on the current stack. Re-running
-> this repo's own documented command on a quiet machine now yields **9.6 tok/s**
-> (uniform) and **8.5 tok/s** (mixed) against the 104.7 / 105.3 tok/s recorded below —
-> roughly 11×. Run-to-run spread today is 0.2–0.33%, so this is a clean measurement,
-> not noise. Cause is unresolved: most likely a regression in the inference stack
-> since the original measurement, possibly an error in the original. See
-> [Throughput and memory](#throughput-and-memory-measured). **Accuracy results are
-> unaffected** — they are re-verified below.
+> ## 🔴 All performance and accuracy numbers in this repo are under re-measurement
+>
+> **CUDA graph capture produces numerically incorrect output for this model on
+> SM120 (consumer Blackwell).** Found 2026-08-11. Every figure previously published
+> here — throughput *and* accuracy — was measured on that path and is therefore
+> measuring corrupted arithmetic, not this checkpoint.
+>
+> Reproduction, greedy decoding, prompt *"Name three primary colors"*:
+>
+> | configuration | output |
+> |---|---|
+> | default backend, CUDA graphs on | `"sngths uniform."` |
+> | `cutlass` backend, graphs on | garbage |
+> | `marlin` backend, graphs on | garbage |
+> | **default backend, `enforce_eager=True`** | **coherent, on-topic** |
+>
+> `marlin` is weight-only and barely touches the FP4 MoE path, yet still computes
+> wrong under capture. Three independent compute paths fail identically with graphs
+> enabled; the same path is correct with them disabled. **The fault is graph
+> capture, not the FP4 kernels, and not the checkpoint.**
+>
+> **Working configuration today: `enforce_eager=True`.** Correct, still genuinely
+> W4A4, and it forfeits the CUDA graph speedup.
+>
+> **Why this went unnoticed for months:** every accuracy task used here —
+> HellaSwag, ARC-Easy, PIQA, WinoGrande — is *loglikelihood*. Those score
+> pre-written continuations, measuring ranking rather than generation. A model that
+> could not form a sentence scored **61.18% on HellaSwag**. IFEval is being added
+> to close that blind spot.
+>
+> Related upstream, though all framed as FP4-kernel bugs rather than graph capture:
+> [CUTLASS #3096](https://github.com/NVIDIA/cutlass/issues/3096),
+> [FlashInfer #2723](https://github.com/flashinfer-ai/flashinfer/issues/2723),
+> [vLLM #38718](https://github.com/vllm-project/vllm/issues/38718) ·
+> [#47365](https://github.com/vllm-project/vllm/issues/47365) ·
+> [#50084](https://github.com/vllm-project/vllm/issues/50084).
+>
+> No corrected numbers are published here yet. They will be re-measured with
+> `enforce_eager=True` before any claim is restated.
 
 Two checkpoints are published: a **6.02 GB** fully-uniform build and a **9.46 GB**
 mixed-precision build. The difference between them has been measured with a paired
@@ -36,7 +66,7 @@ Everything here was built and debugged on a single RTX 5070 Ti.
 
 | Result | Detail |
 |--------|--------|
-| ⚠️ Decode throughput **under re-measurement** | Previously headlined as 102.6 tok/s single / 407.4 tok/s batch-8. Does not reproduce on the current stack (2026-08-10): 9.6 / 8.5 tok/s from this repo's own command, 0.2% spread. Unresolved — see the [note above](#zaya1-godspeed) |
+| 🔴 **All numbers under re-measurement** | CUDA graph capture computes incorrect results for this model on SM120. Throughput *and* accuracy figures were measured on that path. Working config is `enforce_eager=True`; corrected numbers pending — see the [note above](#zaya1-godspeed) |
 | **6.02 GB / 9.46 GB checkpoints** | Uniform build: all 1,320 Linears packed NVFP4 W4A4, zero BF16 exemptions. Mixed build: 936 W4A4 + 384 outlier-sensitive Linears kept BF16. The exemptions cost 3.44 GB and buy 0.71 pp of HellaSwag |
 | **−36% size for −0.71 pp** | Removing all BF16 exemptions costs 0.71 pp on HellaSwag (n=10,042, 95% CI [−1.26, −0.15], paired McNemar). Measured, not assumed — the first attempt used an unpaired test and got the sign wrong |
 | **Checkpoint verified healthy** | Budget-forced GPQA-Diamond rises monotonically with reasoning budget — 45.8% → 62.5% at a 12k-token think budget vs Zyphra's BF16 CoT 71.0%. At n=24 the confidence interval is wide (~±19 pts), so treat this as a health signal, not a parity claim |
@@ -111,7 +141,13 @@ vllm bench latency --model <checkpoint> --dtype bfloat16 --kv-cache-dtype fp8 \
 | Weights in VRAM | 5.59 GiB | 8.82 GiB |
 | CUDA graphs | 4.03 GiB | 3.62 GiB |
 
-> ### ⚠️ Re-measurement, 2026-08-10 — these numbers do not currently reproduce
+> ### 🔴 Void — measured on a numerically incorrect kernel path
+>
+> The figures in this section, and the re-measurement below, were all produced with
+> CUDA graphs enabled, which computes wrong results for this model on SM120 (see the
+> top of this README). They are not a valid comparison between checkpoints and are
+> retained only as a record of what was measured. The 3.4× run-to-run throughput
+> variance observed here is very likely the same defect.
 >
 > Re-running the exact command above, on the same two checkpoints, on an idle
 > machine:

@@ -616,7 +616,39 @@ dedicated agentic RL at scale. This is a first cycle.
 
 ---
 
-## Inference Performance — open regression (2026-08-10) 🔴
+## 🔴 ROOT CAUSE FOUND (2026-08-11): CUDA graph capture computes wrong results
+
+**Everything in the section below was measured on a numerically incorrect kernel
+path and is void.** The method stands; the numbers do not.
+
+Greedy decoding on `-uniform`, *"Name three primary colors"*: default backend with
+CUDA graphs returned `"sngths uniform."` — token soup. The identical weights with
+`enforce_eager=True` returned a coherent, on-topic answer. A backend sweep found
+`cutlass` and `marlin` also produce garbage under capture, while
+`flashinfer_trtllm`, `flashinfer_cutedsl`, `triton` and `emulation` refuse to
+initialise for this model.
+
+**`marlin` is the decisive datapoint** — it is weight-only and barely touches the
+FP4 MoE path, yet still computes wrong under capture. So this is **not** an FP4
+kernel bug: it is CUDA graph capture, independent of MoE backend.
+
+**Working configuration: `enforce_eager=True`.** Correct, still W4A4, no graph
+speedup.
+
+### Revised priorities
+
+| # | Task | Why |
+|---|------|-----|
+| 1 | Re-measure throughput with `enforce_eager=True` | first defensible number this project has had |
+| 2 | **Add IFEval**, re-run accuracy in eager mode | every task here is loglikelihood — it measures *ranking*, never *producing*, which is why a model that could not form a sentence scored 61.18% HellaSwag. Scores may rise |
+| 3 | Redo uniform vs exempted | that comparison measured corrupted arithmetic |
+| 4 | [CUTLASS #3096](https://github.com/NVIDIA/cutlass/issues/3096) rebuild — FlashInfer SM120 patches + `compute_120f` | reports 39 tok/s native FP4 **with graphs working**: correct *and* fast |
+| 5 | Restate public claims | only after 1–4 |
+
+⚠️ Upstream issues describe FP4 *kernel* bugs; this reproduces with a non-FP4
+backend, so re-search with graph-capture terms before assuming it is known.
+
+## Inference Performance — void, measured on the broken path (2026-08-10) ⛔
 
 A full benchmark pass over both published checkpoints, using standard tooling only
 (`vllm bench latency|throughput|serve`, lm-eval-harness), under recorded conditions.

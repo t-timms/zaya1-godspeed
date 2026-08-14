@@ -165,3 +165,72 @@ Before claiming something works:
 2. Check against the source documentation for correctness
 3. If training: run a dry-run batch (forward + backward pass) before full run
 4. If deployment: verify health endpoint responds before reporting success
+
+### 🔴 FIRST: CUDA graph capture is numerically broken on SM120
+
+**Before diagnosing ANY output or performance problem, rule this out.**
+CUDA graph capture — not any specific kernel — produces numerically wrong
+output for this model on consumer Blackwell (SM120). Confirmed 2026-08-14 by
+sweeping three independent backends (`flashinfer_cutlass` default, `cutlass`,
+and `marlin`) all under graph capture: all three produced garbage. The same
+weights with `enforce_eager=True` produced coherent, on-topic output on every
+backend. `marlin` is the decisive datapoint — it is weight-only and barely
+touches the FP4 MoE path, and it still failed identically. **There is no
+`--moe-backend` flag that fixes this** — an earlier version of this note
+recommended `marlin` as a workaround; that was wrong, corrected here.
+
+**The only fix: `enforce_eager=True`.** Correct, still genuinely W4A4,
+forfeits the graph speedup. See `README.md` → "Known Issue: CUDA graph
+capture corrupts output on SM120" and `RESEARCH.md` §5.14 for the full
+backend sweep and root-cause writeup.
+
+Symptom cluster — any of these means suspect graph capture, not the checkpoint:
+- garbage or empty completions, **worse at greedy than at sampling**
+- loglikelihood evals scoring fine (ranking-only tasks can't detect this —
+  see [[gotcha_zaya_benchmark_chat_template]] equivalent note in this repo)
+- throughput wildly nondeterministic across launches on an identical command
+
+**Diagnostic rule: before concluding a checkpoint is damaged, re-run one
+prompt with `enforce_eager=True`.** Thirty seconds. Months of "is the
+checkpoint healthy" work proceeded without it.
+
+### Benchmarking Protocol (every rule here was learned by breaking it)
+
+**Batch-1 decode throughput on this hardware is not reproducible from a
+single run.** Once the CUDA-graph correctness bug above is controlled for
+(`enforce_eager=True`), remaining run-to-run variance is small (3.6–3.9%,
+see `RESEARCH.md` §5.14) — but before that fix was known, an identical
+command measured 9.6 / 32.2 / 23.7 tok/s across three invocations, each
+internally tight to 0.2–1.8%. **A 3.4× range**, symptomatic of the
+correctness bug itself rather than ordinary noise.
+
+1. **Never publish a throughput number from one run.** Median of ≥5 process
+   invocations, and report the range. Within-run spread is *not* evidence of
+   reliability — a run can spread 0.2% internally and still land 3× off the
+   next invocation.
+2. **To reproduce a published number, run the published command.** Running a
+   different workload and comparing is a different experiment, not a failed
+   reproduction. This mistake produced a false "does not reproduce" conclusion
+   earlier in this project's history.
+3. **Close GPU consumers first.** Wallpaper Engine, browsers, Steam. An
+   animated wallpaper polls at 0–1% utilisation while still inflating
+   run-to-run spread from 0.2% to 181%. **Instantaneous utilisation does not
+   detect it** — guard on the measured spread instead, and reject any run
+   spreading >3%. (`~/scripts/we-control.sh pause|play` handles this.)
+4. **Warm the compile cache in a separate, unmeasured stage.** Cold was
+   12m31s vs 2m43s warm; a cold-cache timing measures the CUDA compiler, not
+   the model.
+5. **Judge success by artifact content, not exit code.** vLLM can abort at
+   teardown *after* writing a valid result. Validate the JSON parses — do not
+   apply a size threshold (a 200-byte floor once rejected a valid 188-byte
+   result).
+6. **Interleave A/B reps** (A,B,A,B…), never blocked. Blocked runs let
+   thermal drift and run order masquerade as the effect being measured.
+7. **Accuracy comparisons between checkpoints are PAIRED.** Use
+   `--log_samples`, join per `doc_id`, verify `doc_hash` matches so both runs
+   provably scored the same items, then McNemar on discordant pairs.
+   Comparing aggregate accuracies discards the pairing and wastes the run.
+8. **Record the environment fingerprint per run** — vLLM *commit* (this is a
+   source build; the version string is insufficient), flashinfer, torch,
+   driver, CUDA. A stack change with unchanged throughput still invalidates
+   prior claims.

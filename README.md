@@ -192,6 +192,15 @@ so than the accuracy difference.
 > the model, the CUDA toolkit version, and the llama.cpp commit as causes; the
 > fingerprint matches known WSL2/Blackwell driver-level deadlock reports. Not
 > resolved as of 2026-08-14. Full six-attempt diagnostic log: `RESEARCH.md` §5.16.
+>
+> **Update, same day:** the gap likely has a principled cause independent of
+> the hang above. Activation quantization (W4A4) gives no speed benefit at
+> batch-1 — decode there is memory-bandwidth-bound, and quantizing
+> activations only helps when compute is the bottleneck (batched serving,
+> prefill). Weight-only quantization is expected to win at batch-1 by design;
+> W4A4's advantage is memory footprint and batched throughput, which this
+> project already measures at batch-8 (73–74 tok/s, 96–98% of ideal scaling).
+> Detail: `RESEARCH.md` §5.17.
 
 ### Paired evaluation
 

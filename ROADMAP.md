@@ -533,6 +533,34 @@ evidence exists and disagrees with our number by a wide margin; we simply
 couldn't verify it on matched hardware this session. Next attempt starts with
 a Windows driver / WSL kernel update, not another build variation.
 
+##### Second addendum, same day: the gap likely has a principled cause
+
+Went looking for engineering levers to close the gap and found a better
+answer first: **activation quantization (W4A4) provides no speed benefit at
+batch-1 and can be slower than weight-only quantization** — decode at
+batch-1 is memory-bandwidth-bound, and quantizing activations only pays off
+when compute is the bottleneck (batched serving, prefill). This is
+documented, expected behavior for the scheme, not a bug. The §5.16 comparison
+(45.9 tok/s weight-only vs. 9.5 tok/s W4A4) was comparing two different
+design points, not a fair speed contest. W4A4's actual advantage — memory
+footprint and batched throughput — shows up exactly where this project
+already measured it: batch-8 at 73–74 tok/s, 96–98% of ideal scaling.
+
+**This doesn't fully close §5.16** (still blocked on the WSL2 hang for a
+real same-hardware comparison), but it means no engineering fix is owed
+before publishing current numbers — the gap is now principled, not
+mysterious. Full writeup: `RESEARCH.md` §5.17. Filed upstream WSL logs
+attached same day: [microsoft/WSL#41361](https://github.com/microsoft/WSL/issues/41361).
+
+Also explored, same day: **SGLang has genuine ZAYA1 support** (merged
+[PR #26347](https://github.com/sgl-project/sglang/pull/26347), v0.5.14) —
+untested against our compressed-tensors NVFP4 checkpoint specifically, but a
+real option that doesn't touch the broken llama.cpp/WSL2 path. **Speculative
+decoding** is the more promising lever if further speed work is wanted:
+MoE-specific research shows real batch-1 gains from temporal correlation in
+expert routing, and this project already has speculative-decoding experience
+elsewhere in the stack (Godspeed).
+
 #### Engineering Cleanup — Session 15 Action Items ⬜
 
 The following items were identified as unprofessional shortcuts during session 15.

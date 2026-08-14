@@ -576,6 +576,29 @@ Full methodology and numbers: `RESEARCH.md` §5.18. **Not yet wired into
 `~/scripts/vllm-serve.sh`** — logged now so it isn't lost, deployment is a
 separate follow-up.
 
+##### Fourth addendum, same day: deployed to the production serve script
+
+Wired `--speculative-config` into `~/scripts/vllm-serve.sh` (the script behind
+the desktop SERVE button) alongside the mandatory `--enforce-eager` flag.
+Validated live, not just in the offline benchmark harness: started the real
+server, waited for `/health`, sent a real request to `/v1/chat/completions`
+with a coding-edit-style prompt, got coherent output back through the actual
+OpenAI-compatible API. Stopped the test server afterward (not left running
+unrequested).
+
+One tradeoff surfaced only at serve time: vLLM logs that async scheduling is
+disabled when n-gram speculative decoding is active. This is a real
+secondary cost the offline 2.2× figure doesn't account for (that number
+compared `enforce_eager` on/off, not async-scheduling on/off) — presumed net
+positive given the size of the win, but not independently measured.
+
+**Flagged, not resolved:** `~/scripts/vllm-serve.sh` has no version control
+(no git repo at `~/scripts`, no chezmoi tracking it) — this change, and the
+whole script, would be lost on an environment rebuild. A separate decision
+from this finding.
+
+Full detail: `RESEARCH.md` §5.18 (update).
+
 #### Engineering Cleanup — Session 15 Action Items ⬜
 
 The following items were identified as unprofessional shortcuts during session 15.

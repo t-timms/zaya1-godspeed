@@ -205,8 +205,10 @@ so than the accuracy difference.
 > **A real batch-1 lever that does exist:** vLLM's built-in n-gram speculative
 > decoding gives a validated **2.2× speedup on coding-edit prompts** (zero
 > training, one config flag) — no gain on free-form generation, as expected,
-> but coding-edit is most of an agentic coding workload. Not yet wired into
-> the production serve script. Detail: `RESEARCH.md` §5.18.
+> but coding-edit is most of an agentic coding workload. **Deployed to the
+> production serve script and validated live** through the real
+> OpenAI-compatible API, not just the offline benchmark harness. Detail:
+> `RESEARCH.md` §5.18.
 
 ### Paired evaluation
 

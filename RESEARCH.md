@@ -1194,11 +1194,33 @@ bound, which n-gram decoding works *around* by skipping steps entirely when
 speculation succeeds, not by making each step faster. Compatible, additive
 levers, not competing explanations.
 
-**Not yet done:** wiring this into `~/scripts/vllm-serve.sh` (the actual
-production serving path) — logged here so the finding isn't lost, not yet
-deployed. Also not yet tried: Token Recycling or EAGLE-family methods (§ prior
-research), which could add further gains on top of or instead of n-gram,
-particularly for the free-form-generation case this doesn't help.
+**Update, same day: deployed and validated end-to-end.** `~/scripts/vllm-serve.sh`
+now starts with `--speculative-config`. Confirmed via a real request through
+the live OpenAI-compatible API (not just the offline benchmark harness) —
+server reaches healthy, responds coherently to a coding-edit request.
+
+One real tradeoff surfaced only at serve time, not visible in the offline
+benchmark: vLLM logs `"Async scheduling not supported with ngram-based
+speculative decoding and will be disabled."` Async scheduling was on in the
+pre-n-gram config; this is a real secondary cost of enabling n-gram decoding,
+not accounted for in the 2.2× figure above (which compared enforce_eager
+on/off, not async-scheduling on/off). Given the 2.2× win, presumed net
+positive, but not independently measured — if a future speed regression
+shows up in real usage, check this first before assuming n-gram itself
+regressed.
+
+Also noted: vLLM warns `max_num_scheduled_tokens is set to 2048 based on the
+speculative decoding settings... Consider increasing max_num_batched_tokens`
+— a real tuning knob left unexplored, not a problem.
+
+**Not yet tried:** Token Recycling or EAGLE-family methods (§ prior research),
+which could add further gains on top of or instead of n-gram, particularly
+for the free-form-generation case this doesn't help.
+
+**Infrastructure note:** `~/scripts/vllm-serve.sh` is not under version
+control (confirmed — no git repo at `~/scripts`). This fix, and the whole
+script, would be lost if this WSL environment were ever rebuilt. Flagged, not
+resolved — a separate decision, not part of this finding.
 
 ### 6.1 Audited Repositories
 

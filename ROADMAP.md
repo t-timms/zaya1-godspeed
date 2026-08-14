@@ -488,13 +488,24 @@ swing under CUDA graphs, which was a symptom of this same bug, not separate
 noise. Full detail and citations: `README.md` → "Known Issue: CUDA graph
 capture corrupts output on SM120".
 
-##### Open question, now sharper
+##### Open question, now sharper — then retired (same session)
 
 The ~10× TPOT gap flagged in earlier sessions (`trtllm::fused_moe::gemm2`
-skipping all tactics) is not resolved by this fix — `enforce_eager` avoids the
+skipping all tactics) is not resolved by `enforce_eager` alone — it avoids the
 *correctness* bug but decode is still slow in absolute terms. Near-linear
 batch-8 scaling (above) is consistent with a batch-independent per-step
-overhead, which narrows the search but doesn't close it.
+overhead, which narrowed the search.
+
+**Tested the obvious next step same-day: `--moe-backend marlin`.** Result:
+statistically identical to the default backend (9.69 vs 9.52 tok/s single,
+72.75 vs 73.4 tok/s batch-8 — within the ~3.6–3.9% noise floor). Two
+architecturally unrelated kernels landing at the same speed is evidence
+*against* a fixable wrong-tactic bug. Worse: the "~10×" framing was measured
+against the 102.6 tok/s figure this same session retracted for being
+numerically invalid — a broken code path has no guaranteed relationship to how
+much correct work it was doing. **Verdict: the TPOT gap is retired as an open
+bug, not solved.** Current honest speed (9.5–9.7 tok/s) may simply be what
+this architecture costs on this hardware. Full writeup: `RESEARCH.md` §5.15.
 
 ##### Downstream corrections applied this session
 

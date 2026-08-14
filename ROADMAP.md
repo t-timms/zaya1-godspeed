@@ -561,6 +561,21 @@ MoE-specific research shows real batch-1 gains from temporal correlation in
 expert routing, and this project already has speculative-decoding experience
 elsewhere in the stack (Godspeed).
 
+##### Third addendum, same day: speculative decoding tested, real 2.2× win found
+
+Acted on the lever flagged above. vLLM's built-in n-gram speculative decoding
+(`--speculative-config '{"method": "ngram", ...}'`, zero training, zero new
+model) gives **no gain on free-form generation** (~9.3 vs ~9.5 tok/s baseline
+— expected, no context overlap to exploit) but a **validated 2.2× speedup on
+realistic coding-edit prompts** (21.11 vs 9.62 tok/s median, 5 reps each,
+zero anomalies, output coherence confirmed identical in both modes). This is
+close to exactly Godspeed's actual workload shape (read a file, echo most of
+it back with a small edit).
+
+Full methodology and numbers: `RESEARCH.md` §5.18. **Not yet wired into
+`~/scripts/vllm-serve.sh`** — logged now so it isn't lost, deployment is a
+separate follow-up.
+
 #### Engineering Cleanup — Session 15 Action Items ⬜
 
 The following items were identified as unprofessional shortcuts during session 15.

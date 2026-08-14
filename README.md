@@ -201,6 +201,12 @@ so than the accuracy difference.
 > W4A4's advantage is memory footprint and batched throughput, which this
 > project already measures at batch-8 (73–74 tok/s, 96–98% of ideal scaling).
 > Detail: `RESEARCH.md` §5.17.
+>
+> **A real batch-1 lever that does exist:** vLLM's built-in n-gram speculative
+> decoding gives a validated **2.2× speedup on coding-edit prompts** (zero
+> training, one config flag) — no gain on free-form generation, as expected,
+> but coding-edit is most of an agentic coding workload. Not yet wired into
+> the production serve script. Detail: `RESEARCH.md` §5.18.
 
 ### Paired evaluation
 

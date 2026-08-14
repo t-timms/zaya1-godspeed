@@ -1148,6 +1148,58 @@ weight-only quantization at every batch size — it doesn't, by design, and
 claiming otherwise would be exactly the kind of overclaim this project has
 spent this whole line of investigation avoiding.
 
+### 5.18 N-gram Speculative Decoding: 2.2× on Coding-Edit Workloads, No Gain on Free-Form Text (2026-08-14)
+
+**Headline: vLLM's built-in n-gram speculative decoding — zero training, zero
+new model, one config flag — gives a real, validated 2.2× speedup on
+code-editing prompts. It gives nothing on free-form generation. Both results
+are expected and both matter: Godspeed's actual workload is almost entirely
+the former.**
+
+n-gram (prompt-lookup) speculative decoding proposes draft tokens by matching
+against recent context rather than running a second model. It only pays off
+when upcoming output overlaps with what's already been said — which is
+exactly the shape of a coding-agent request (read a file, echo most of it
+back with a small edit) and exactly *not* the shape of free-form generation.
+
+**Test 1 — free-form prompt** ("why is the sky blue"), `vllm bench latency`,
+`--speculative-config '{"method": "ngram", "num_speculative_tokens": 5,
+"prompt_lookup_max": 5, "prompt_lookup_min": 2}'`: ~9.3 tok/s, indistinguishable
+from the ~9.5 tok/s baseline. No overlap for the proposer to exploit, no gain.
+Expected, not a negative result about the method — a mismatched test case.
+
+**Test 2 — realistic coding-edit prompt.** `vllm bench latency` only generates
+synthetic random tokens, so it can't test this — a small bespoke script
+(`coding_edit_bench.py`) was written instead, feeding the model a real 98-line
+file from this repo (`scripts/verify_w4a4_dequant.py`) with instructions to
+return the complete file with two small changes. 5 process invocations per
+condition, `enforce_eager=True`, uniform checkpoint, greedy, 500-token cap,
+chat-templated:
+
+| | median tok/s | range |
+|---|---:|---|
+| Baseline | 9.62 | 9.13–9.82 |
+| N-gram speculative decoding | **21.11** | 20.13–21.93 |
+
+**2.2× speedup, zero anomalies across all 10 runs.** Output checked for
+coherence in both modes — same on-topic reasoning content, no corruption or
+repetition, consistent with speculative decoding's rejection-sampling
+guarantee that output distribution is preserved exactly (this isn't a
+sampling shortcut; it's provably identical output, just fewer full forward
+passes to get there).
+
+**Relevance to §5.17:** this doesn't change the batch-1 W4A4-vs-weight-only
+tradeoff finding — that's about the underlying decode step's memory-bandwidth
+bound, which n-gram decoding works *around* by skipping steps entirely when
+speculation succeeds, not by making each step faster. Compatible, additive
+levers, not competing explanations.
+
+**Not yet done:** wiring this into `~/scripts/vllm-serve.sh` (the actual
+production serving path) — logged here so the finding isn't lost, not yet
+deployed. Also not yet tried: Token Recycling or EAGLE-family methods (§ prior
+research), which could add further gains on top of or instead of n-gram,
+particularly for the free-form-generation case this doesn't help.
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)

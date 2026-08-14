@@ -1101,6 +1101,53 @@ reference point (GGUF, MXFP4, MLX, bnb, ONNX). None publish one. The 45.9
 tok/s figure remains the only external number that exists, sourced from a PR
 comment, not a model card.
 
+### 5.17 The Gap Has a Principled Explanation We'd Been Missing: W4A4 Isn't Supposed to Win at Batch-1 (2026-08-14)
+
+**Headline: activation quantization (the "A4" in W4A4, this project's core differentiator)
+provides no speed benefit at batch-1, and can be slower than weight-only
+quantization at the same bit-width. This is documented, expected behavior for
+the quantization scheme, not a bug — and it plausibly explains a substantial
+part of the gap chased since §5.14, without requiring anything to be fixed.**
+
+Decode at batch-1 is memory-bandwidth-bound: the dominant cost is loading
+weights from VRAM, not the matrix multiplication itself. Quantizing
+activations only pays off when compute is the bottleneck — batched serving or
+prefill — because it lets both operands use Blackwell's FP4 tensor cores at
+full rate. At batch-1, there's no compute bottleneck to relieve, so
+activation quantization adds dequant/requant overhead without offsetting
+gain. Documented example at comparable scale: weight-only NVFP4 beat full
+W4A4 on the same hardware at small batch for Gemma 4 12B.
+
+This means the §5.16 comparison (45.9 tok/s weight-only Q4_K_M on a slower
+GPU vs. 9.5 tok/s W4A4 here) was never purely an apples-to-apples speed
+contest — it was comparing two quantization schemes with different design
+points. **Weight-only optimizes for batch-1 decode. W4A4 optimizes for memory
+footprint and batched/compute-bound throughput.** The batch-8 numbers in this
+project (73–74 tok/s, 96–98% of ideal linear scaling from batch-1) are
+exactly where W4A4 should be expected to show its advantage, and do.
+
+**What this does and doesn't resolve:**
+- Does: give the gap a principled, well-documented cause instead of leaving
+  it as an unexplained anomaly. No further engineering effort is owed here
+  before publishing a number — the number is now understood, even without a
+  precise "the gap should be exactly N×" model.
+- Doesn't: fully close the question. This is a general documented tendency,
+  not a measurement of *this* checkpoint's specific dequant overhead. §5.16's
+  blocker (llama.cpp hangs on this hardware) still stands between us and a
+  same-hardware, same-scheme empirical comparison, and the filed upstream
+  reports (`microsoft/WSL#41361`) remain the path to closing that gap if a
+  fix ever lands.
+
+**Consequence for how this project talks about itself:** the differentiator
+framing throughout this repo and its downstream surfaces ("W4A4 — activation
+quantization is the moat") is accurate about *what's distinct*, but was
+previously silent on *where the win shows up*. It's memory footprint and
+batched/prefill throughput, not single-stream decode latency. Worth stating
+that precisely rather than leaving a reader to assume W4A4 should beat
+weight-only quantization at every batch size — it doesn't, by design, and
+claiming otherwise would be exactly the kind of overclaim this project has
+spent this whole line of investigation avoiding.
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)

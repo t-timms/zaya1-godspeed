@@ -1010,6 +1010,97 @@ llama.cpp GGUF build of ZAYA1 (§ecosystem survey, 2026-08-14: `Abiray/ZAYA1-8B-
 own MoE kernel benchmarks at comparable shapes. Neither has been done. Until
 one is, "TPOT gap" is a retired framing, not an open bug.
 
+### 5.16 An Independent Reference Number Exists — but Could Not Be Verified on This Hardware (2026-08-14)
+
+**Headline: a real external throughput reference for ZAYA1 does exist (llama.cpp
+PR #23112's own author, RTX 4070 Ti, 45.9 tok/s), and it points the opposite
+direction from §5.15's conclusion — a slower GPU beating our number by ~4.8×.
+Five independent, well-diagnosed attempts to reproduce it directly on our own
+SM120 hardware all failed the same way: a non-deterministic hang. This is not
+a fixable software bug we found — it is a genuine blocker, documented in full
+so it isn't silently re-attempted or silently ignored.**
+
+§5.15 retired the "~10× TPOT gap" question partly because no independent
+throughput reference existed for ZAYA1 anywhere. That premise turned out to be
+wrong: `llama.cpp` [PR #23112](https://github.com/ggml-org/llama.cpp/pull/23112)
+(the draft that `Abiray/ZAYA1-8B-GGUF`, 2,127 downloads, depends on) has the
+author's own reported numbers in the PR thread:
+
+| Hardware | Quant | Generation |
+|---|---|---:|
+| RTX 4070 Ti | BF16 | 11.0 tok/s |
+| **RTX 4070 Ti** | **Q4_K_M** | **45.9 tok/s** |
+| AMD 9060 XT (ROCm) | — | ~30–35 tok/s |
+| Raspberry Pi 5 16GB | Q6_K | 6.5–6.9 tok/s |
+
+RTX 4070 Ti (Ada) has ~504 GB/s memory bandwidth versus our RTX 5070 Ti
+(Blackwell)'s 896 GB/s — roughly 1.8× less. A weights-only Q4_K_M GGUF on a
+slower card beating our 9.5 tok/s W4A4 checkpoint by ~4.8× is a real signal
+worth chasing, not something to wave away with a caveat.
+
+**Direct reproduction attempt — five independent variables tested, all failed
+the same way:**
+
+1. **Default build** (llama.cpp master + PR #23112 branch, CUDA 13.2 toolkit,
+   `-DCMAKE_CUDA_ARCHITECTURES=120`): `llama-cli` on the ZAYA Q4_K_M GGUF hung
+   completely — alive 26+ minutes, near-zero CPU/GPU utilization, immune to
+   `timeout`'s default SIGTERM, required `kill -9`.
+2. **`GGML_CUDA_DISABLE_GRAPHS=1`** (the documented fix for a matching symptom
+   — "CUDA graph update failed... endless loop without returning"): same
+   signature, a small burst of initial activity then a stall.
+3. **CPU-only (`-ngl 0`)**: genuine progress this time (real CPU-time
+   accumulation, unlike the GPU attempts) — then also stalled and needed
+   `kill -9`. Isolates the hang to the GPU path specifically.
+4. **A completely mainstream model** (`bartowski/Llama-3.2-1B-Instruct-GGUF`,
+   138K downloads, nothing ZAYA-specific) through the identical build: **also
+   hung**, zero output, exit 124. This ruled out the ZAYA/CCA-conv code as the
+   cause — the bug is in the build/environment, not the model.
+5. **Rebuilt against CUDA 12.8** (user-local install, no driver component —
+   motivated by a documented CUDA-13.2-and-GGUF-inference warning from
+   Unsloth's own docs): mainstream model **still hung**, identically.
+6. **Rebuilt at `llama.cpp` tag `b7376`** (the last confirmed-good SM120 tag
+   per [issue #18090](https://github.com/ggml-org/llama.cpp/issues/18090),
+   pre-dating a documented Blackwell regression window `b7376→b7410+`): first
+   run produced real output — GPU detected, memory breakdown printed, clean
+   exit at the timeout boundary. **Identical rerun of the identical command
+   hung earlier and harder**, immune to SIGTERM again.
+
+Step 6 is the deciding data point. The same binary, same command, same model,
+back to back, produced a working run and a hard hang. **That rules out a
+deterministic software bug tied to a commit, a CUDA version, or a flag** — the
+one thing consistent across all six attempts is timing-dependent flakiness,
+not configuration. This fingerprint matches two independently-documented
+external reports rather than anything specific to this project: a GSP
+firmware silent hard-hang on SM120
+([NVIDIA/open-gpu-kernel-modules#1111](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1111))
+and general WSL2 "CUDA app hangs at 0% GPU util, `nvidia-smi` still works,
+driver-level deadlock" reports. Neither is a confirmed match — just the same
+class of problem.
+
+**Why this isn't chased further this session:** every lever available from the
+build side (toolkit version, llama.cpp commit, CUDA-graph flag, backend)
+produced the same non-deterministic outcome. The remaining candidates —
+Windows-side driver update, WSL kernel update — are outside what re-running
+builds can fix, and outside this session's scope.
+
+**What this changes:** the TPOT question is **not** closed the way §5.15
+suggested. An external reference exists, it disagrees with our number by a
+wide margin, and the honest state is *"real evidence unable to be
+independently verified,"* not *"no evidence exists."* Citing 45.9 tok/s (RTX
+4070 Ti, Q4_K_M) requires these caveats every time: different GPU architecture
+entirely (not a same-hardware comparison), weights-only quantization versus
+this project's W4A4 (activations quantized too — should theoretically favor
+W4A4, not disfavor it), and the PR author's own admission that their CCA
+attention convolution kernel (`ggml_conv_1d_grouped`) is "naive... instead of
+a dedicated kernel per backend" — their number may itself be a floor, not a
+ceiling.
+
+**Ecosystem survey reconfirmed (2026-08-14):** 30+ ZAYA1 quant repos on
+HuggingFace surveyed for any published throughput number to use as a second
+reference point (GGUF, MXFP4, MLX, bnb, ONNX). None publish one. The 45.9
+tok/s figure remains the only external number that exists, sourced from a PR
+comment, not a model card.
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)
@@ -1223,12 +1314,14 @@ moves accuracy.
 - Add IFEval (or another free-generation eval) to the standard accuracy suite
   permanently — loglikelihood-only evaluation is why the graph-capture bug went
   undetected for months (§5.14).
-- ~~The ~10× TPOT gap is still open~~ — **retired 2026-08-14 (§5.15):** Marlin
-  landed statistically identical to the default backend, and the "10×"
-  framing itself was measured against the retracted 102.6 tok/s figure. If a
-  real reference speed ever surfaces (independent llama.cpp GGUF benchmark,
-  NVIDIA kernel numbers at this shape), re-open the question against that —
-  not against this project's own prior number.
+- **TPOT gap: reopened 2026-08-14 (§5.16), not retired.** §5.15's retirement
+  assumed no independent reference existed; one does (llama.cpp PR #23112
+  author, 45.9 tok/s on a slower RTX 4070 Ti). Direct reproduction on our own
+  SM120 hardware hit a genuine, five-times-confirmed non-deterministic hang
+  (§5.16) — a WSL2/driver-level issue, not a llama.cpp or ZAYA bug. Next
+  attempt should start with a Windows NVIDIA driver update or WSL kernel
+  update before any more build/version changes; re-running the same build
+  variations again would not add new information.
 
 ### ⬜ Publication
 

@@ -513,6 +513,26 @@ Both HF model cards, the GitHub profile README, and the portfolio site all
 quoted 102.6/407.4 tok/s and have been corrected to match this table — tracked
 so the numbers don't drift back out of sync on the next edit.
 
+##### Addendum, same day: the "retired" verdict above was premature
+
+Went looking for an independent throughput reference to validate that
+retirement and found one — llama.cpp PR #23112's own author reports **45.9
+tok/s on an RTX 4070 Ti** (Q4_K_M), a slower GPU beating our 9.5 tok/s by
+~4.8×. Attempted direct reproduction on our own SM120 hardware: **five
+independent build/version/flag combinations, all failed the same way** — a
+non-deterministic hang (works once, hangs on an identical rerun of the same
+binary and command). Ruled out: the ZAYA model/CCA code (a completely
+mainstream Llama 3.2 1B GGUF hung identically), the CUDA 13.2 toolkit
+(rebuilt against 12.8, same hang), and the specific llama.cpp commit
+(rebuilt at the pre-regression tag `b7376`, same non-deterministic hang).
+This points to a WSL2/driver-level issue, not a fixable software bug — see
+`RESEARCH.md` §5.16 for the full six-attempt diagnostic log.
+
+**Corrected status: the TPOT gap is reopened, not retired.** Real external
+evidence exists and disagrees with our number by a wide margin; we simply
+couldn't verify it on matched hardware this session. Next attempt starts with
+a Windows driver / WSL kernel update, not another build variation.
+
 #### Engineering Cleanup — Session 15 Action Items ⬜
 
 The following items were identified as unprofessional shortcuts during session 15.

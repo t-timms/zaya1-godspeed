@@ -183,6 +183,16 @@ so than the accuracy difference.
 **Retracted, do not cite:** 102.6 tok/s single-stream / 407.4 tok/s batch-8
 (CUDA graphs; coherent output was never verified at that speed).
 
+> **An unverified external signal exists and disagrees with the table above.**
+> llama.cpp [PR #23112](https://github.com/ggml-org/llama.cpp/pull/23112)'s
+> own author reports 45.9 tok/s on an RTX 4070 Ti (Q4_K_M GGUF) — a slower GPU
+> beating this checkpoint's 9.5 tok/s by ~4.8×. Five independent attempts to
+> reproduce it directly on this project's own SM120 hardware all hit the same
+> non-deterministic hang (works once, hangs on an identical rerun) — ruled out
+> the model, the CUDA toolkit version, and the llama.cpp commit as causes; the
+> fingerprint matches known WSL2/Blackwell driver-level deadlock reports. Not
+> resolved as of 2026-08-14. Full six-attempt diagnostic log: `RESEARCH.md` §5.16.
+
 ### Paired evaluation
 
 Exact-binomial **McNemar on discordant items**, joined per `doc_id`, 14,319 items

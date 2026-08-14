@@ -861,6 +861,106 @@ below is unnecessary — there is no measured damage to repair.** This is itself
 contribution: *how you evaluate (and serve) a long-reasoning model under a fixed compute
 budget* is the real question for consumer-hardware deployment.
 
+### 5.14 CUDA Graph Capture Corrupts NVFP4 MoE Output on SM120 (2026-08-11–14)
+
+**Headline: the published 102.6 / 407.4 tok/s throughput figures were measured on
+a code path that produces numerically wrong output on this card. Not the
+checkpoint, not a specific kernel — CUDA graph capture itself.** This is a
+distinct diagnosis from every FP4-kernel-specific bug logged elsewhere in this
+file; it survived a change of MoE backend, which those bugs by definition do not.
+
+**Symptom (2026-08-11):** greedy decode (temp 0) on `zaya1-8b-nvfp4-w4a4-uniform`
+returned token soup (`"ssngthssystem"`); temp 0.7 returned fluent English that
+was completely off-topic. Both are worse than a healthy model, and greedy being
+*worse* than sampling is itself a tell — a correct model is never worse at
+temp 0.
+
+**Diagnosis — backend sweep, same prompt/weights/tokenizer throughout:**
+
+| backend | with CUDA graphs |
+|---|---|
+| `flashinfer_cutlass` (default) | garbage |
+| `cutlass` | garbage |
+| `marlin` (weight-only) | garbage |
+| `flashinfer_trtllm` / `cutedsl` / `triton` / `emulation` | fails to initialize |
+| any backend, `enforce_eager=True` | ✅ coherent, on-topic |
+
+`marlin` is the load-bearing data point: it is a **weight-only** kernel that
+barely touches the FP4 activation-quantization path, and it still corrupts
+output under graph capture. Three unrelated compute paths fail identically with
+graphs on; the same path succeeds with graphs off. That pattern is only
+consistent with **graph capture itself being at fault**, not any one kernel's
+FP4 math.
+
+**Why loglikelihood evals never caught this:** every accuracy number in this
+project prior to 2026-08-11 (HellaSwag, ARC, PIQA, WinoGrande — §5.6, §5.9,
+Session 16's paired McNemar table) is a **loglikelihood** task. Those score
+pre-written continuations by ranking, never by generating — a completely broken
+generation path can still score ~61% on HellaSwag because multiple-choice
+ranking partially tolerates corrupted logits in a way free generation does not.
+**A damaged generation path and a healthy model are indistinguishable on
+loglikelihood tasks alone.** IFEval or another free-generation eval belongs in
+the standard suite going forward for exactly this reason.
+
+**Two upstream issues are adjacent, neither is a match:**
+
+- [CUTLASS #3096](https://github.com/NVIDIA/cutlass/issues/3096) — SM120 NVFP4
+  MoE grouped-GEMM produces garbage *without* graph capture; fixed via FlashInfer
+  SM120 patches + `compute_120f` (CUDA 13.0), 39 tok/s native FP4. This is
+  baseline kernel correctness, not graph-capture-specific — orthogonal to what
+  we found.
+- [FlashInfer #2776](https://github.com/flashinfer-ai/flashinfer/issues/2776) —
+  NVFP4 MoE crashes during graph capture on SM120/SM121, attributed to a
+  workspace-buffer memory-alignment bug in the FlashInfer TRTLLM decode kernel
+  specifically. Doesn't explain `marlin` — a completely different kernel —
+  failing under capture too. No confirmed fix in the issue; the only workaround
+  offered is disabling FlashInfer MoE FP4 entirely, which doesn't restore graph
+  capture.
+
+Neither issue, as filed, covers "three independent kernel paths including a
+weight-only one all fail under capture." **This project's finding is narrower
+than either upstream report and may be worth filing separately** — low priority
+against the fine-tuning roadmap, but flagged here so it isn't lost.
+
+Also relevant, as general context rather than a fix: Pape, Evertz & Schönherr,
+["The Silent Hyperparameter: Quantifying the Impact of Inference Backends on LLM
+Reproducibility"](https://arxiv.org/abs/2605.19537) (arXiv:2605.19537, 2026) —
+a survey of 200 inference engines finding that backend choice is a rarely
+reported but consequential variable in LLM evaluation. This project's bug is a
+specific, unusually severe instance of the general phenomenon that paper
+documents.
+
+**Re-verification method (2026-08-14):** first attempt used `llm.generate()`
+with a raw prompt string and no chat template — produced fluent but off-topic
+text, which looked like a partial-corruption signature but was actually a
+**test-harness error**: ZAYA is an instruct/reasoning model and does not perform
+sensible raw completion without its chat template, independent of any kernel or
+graph-capture question (§6.5). Re-run via `llm.chat()` with
+`enforce_eager=True`: correct, on-topic, budget-appropriate reasoning on all 3
+prompts (correctly invoked Rayleigh scattering; correctly distinguished RGB vs.
+CMY primary-color systems). This is the first firsthand coherence check on this
+exact checkpoint since the 2026-08-11 sweep, and it confirms that sweep's
+conclusion rather than adding a new one.
+
+**Corrected throughput** (5 process invocations per config, not iterations
+within one process — see the Kalibera & Jones citation in `README.md`; GPU
+otherwise idle): median 9.52 tok/s (uniform) / 9.51 tok/s (mixed) single-stream,
+73.4 / 74.4 tok/s batch-8. Full table, conditions, and the retraction notice:
+`README.md` → "Known Issue: CUDA graph capture corrupts output on SM120". Not
+reproduced here to avoid the numbers drifting out of sync between the two files.
+
+**Consequence for the open TPOT question (§5.12.7):** the ~10× gap between
+expected and measured decode speed, previously attributed to
+`trtllm::fused_moe::gemm2` skipping all tactics, is **not** resolved by this
+fix — `enforce_eager` buys correctness, not the missing speed. The near-linear
+batch-8 scaling measured under the corrected config (96–98% of ideal) is
+consistent with a batch-independent per-step kernel overhead, which narrows
+where to look next but does not close the question.
+
+**Process lesson:** before concluding a checkpoint is damaged, re-run one prompt
+with `enforce_eager=True`. Thirty seconds. Would have saved the confusion in
+§5.13's harness-artifact chase and the retracted throughput figures both.
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)
@@ -1005,6 +1105,7 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 8. Understanding R1-Zero-Like Training: A Critical Perspective. arXiv:2503.20783, 2025.
 9. LoRA: Low-Rank Adaptation of Large Language Models. Hu et al. arXiv:2106.09685, 2021.
 10. QLoRA: Efficient Finetuning of Quantized LLMs. Dettmers et al. arXiv:2305.14314, 2023.
+11. The Silent Hyperparameter: Quantifying the Impact of Inference Backends on LLM Reproducibility. Pape, Evertz & Schönherr. arXiv:2605.19537, May 2026.
 
 ---
 
@@ -1063,6 +1164,19 @@ moves accuracy.
    lm-eval CoT task) so the comparison is apples-to-apples.
 
 </details>
+
+### ⬜ Follow-ups from the CUDA graph capture finding (§5.14, 2026-08-14)
+
+- Consider filing upstream: no existing issue documents CUDA graph capture
+  corrupting output across `flashinfer_cutlass`, `cutlass`, *and* `marlin`
+  identically on SM120 — narrower than CUTLASS #3096 or FlashInfer #2776 as
+  filed. Low priority against the fine-tuning roadmap.
+- Add IFEval (or another free-generation eval) to the standard accuracy suite
+  permanently — loglikelihood-only evaluation is why the graph-capture bug went
+  undetected for months (§5.14).
+- The ~10× TPOT gap (`trtllm::fused_moe::gemm2` skipping all tactics, §5.12.7)
+  is still open; the near-linear batch-8 scaling measured under
+  `enforce_eager` narrows but doesn't close it.
 
 ### ⬜ Publication
 

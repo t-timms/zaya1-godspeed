@@ -8,7 +8,11 @@
 
 **NVFP4 W4A4 inference for Zyphra's ZAYA1-8B on consumer Blackwell (RTX 5070 Ti, SM120)** —
 4-bit weights *and* 4-bit activations running on native CUTLASS FP4 tensor-core kernels,
-at **102.6 tok/s single-stream / 407.4 tok/s batch-8**, within a 16 GB VRAM budget.
+at **9.5 tok/s single-stream / ~74 tok/s batch-8** (`enforce_eager=True`; within a
+16 GB VRAM budget). An earlier **102.6 / 407.4 tok/s** figure was measured under
+CUDA graphs, a code path since confirmed to corrupt output on this card — see
+[Known Issue](#known-issue-cuda-graph-capture-corrupts-output-on-sm120), retracted
+2026-08-14.
 
 Two checkpoints are published: a **6.02 GB** fully-uniform build and a **9.46 GB**
 mixed-precision build. The difference between them has been measured with a paired
@@ -26,7 +30,7 @@ Everything here was built and debugged on a single RTX 5070 Ti.
 
 | Result | Detail |
 |--------|--------|
-| **102.6 tok/s** single / **407.4 tok/s** batch-8 | vLLM + CUDA graphs on RTX 5070 Ti (12.8× over eager mode) |
+| **9.5 tok/s** single / **~74 tok/s** batch-8 | `enforce_eager=True` on RTX 5070 Ti — CUDA graphs produce corrupted output on this card, see [Known Issue](#known-issue-cuda-graph-capture-corrupts-output-on-sm120) |
 | **6.02 GB / 9.46 GB checkpoints** | Uniform build: all 1,320 Linears packed NVFP4 W4A4, zero BF16 exemptions. Mixed build: 936 W4A4 + 384 outlier-sensitive Linears kept BF16. The exemptions cost 3.44 GB and buy 0.71 pp of HellaSwag |
 | **−36% size for −0.71 pp** | Removing all BF16 exemptions costs 0.71 pp on HellaSwag (n=10,042, 95% CI [−1.26, −0.15], paired McNemar). Measured, not assumed — the first attempt used an unpaired test and got the sign wrong |
 | **Checkpoint verified healthy** | Budget-forced GPQA-Diamond rises monotonically with reasoning budget — 45.8% → 62.5% at a 12k-token think budget vs Zyphra's BF16 CoT 71.0%. At n=24 the confidence interval is wide (~±19 pts), so treat this as a health signal, not a parity claim |
@@ -81,45 +85,103 @@ rounding error and landed *after* the mixed-precision decision, so the two
 mitigations were never re-tested together. No residual correction (ARCQuant or
 otherwise) is applied to the uniform checkpoint, and none is required.
 
-### Throughput and memory (measured)
+### Known Issue: CUDA graph capture corrupts output on SM120
 
-Measured with vLLM's own benchmark CLI, not a bespoke harness:
+**The 102.6 / 407.4 tok/s figures previously published here were measured with
+CUDA graphs enabled. That code path is now confirmed to produce numerically wrong
+output on this card. The figures are retracted — not revised, retracted.**
+
+A backend sweep on `zaya1-8b-nvfp4-w4a4-uniform` (greedy decode, identical prompt,
+weights, and tokenizer across rows) found CUDA graph capture corrupts generation
+regardless of MoE kernel:
+
+| backend | with CUDA graphs |
+|---|---|
+| `flashinfer_cutlass` (default) | garbage |
+| `cutlass` | garbage |
+| `marlin` (weight-only) | garbage |
+| any backend, `enforce_eager=True` | ✅ coherent |
+
+Marlin is weight-only and barely touches the FP4 MoE path — it failing exactly
+like the native FP4 kernels rules out a kernel-specific bug. **The fault is graph
+capture itself, not any one kernel.**
+
+Two upstream issues are adjacent but neither currently fixes this exact failure
+mode. [CUTLASS #3096](https://github.com/NVIDIA/cutlass/issues/3096) fixes a
+*different*, non-graph-capture grouped-GEMM correctness bug (stalled, no
+confirmed upstream merge). [FlashInfer #2776](https://github.com/flashinfer-ai/flashinfer/issues/2776)
+is graph-capture-specific but attributes the corruption to a workspace-buffer
+memory-alignment bug in one FlashInfer TRTLLM kernel — that would not explain
+Marlin failing too, so this project's finding is narrower than what either issue
+documents, and may be worth filing separately. Backend-dependent correctness
+drift is a documented class of problem in inference serving generally, not
+unique to this stack — see Pape, Evertz & Schönherr,
+["The Silent Hyperparameter: Quantifying the Impact of Inference Backends on LLM
+Reproducibility"](https://arxiv.org/abs/2605.19537) (arXiv:2605.19537, 2026).
+
+**Only `enforce_eager=True` is confirmed correct on this checkpoint.** Re-verified
+2026-08-14 via chat-templated generation (not just the throughput benchmark,
+which measures speed on synthetic tokens and would not itself catch this) —
+on-topic, factually grounded chain-of-thought reasoning on all three test
+prompts, zero garbage or repetition artifacts. An earlier raw-completion test
+(no chat template) produced fluent-but-off-topic text; that was a test-harness
+error — this model needs its chat template for generative output regardless of
+backend — not evidence of a second bug.
+
+### Throughput and memory (measured, `enforce_eager=True`)
+
+Measured with vLLM's own benchmark CLI, not a bespoke harness. **5 separate
+process invocations per configuration**, not repeated iterations inside one
+process — that's where inference-serving variance actually lives (Kalibera &
+Jones, *Rigorous Benchmarking in Reasonable Time*):
 
 ```bash
 vllm bench latency --model <checkpoint> --dtype bfloat16 --kv-cache-dtype fp8 \
   --gpu-memory-utilization <frac> --max-model-len 4096 --no-enable-prefix-caching \
-  --input-len 128 --output-len 256 --batch-size 1 --num-iters-warmup 1 --num-iters 3
+  --input-len 128 --output-len 256 --batch-size <1|8> --enforce-eager \
+  --num-iters-warmup 1 --num-iters 1
 ```
 
 | | 6.02 GB uniform | 9.46 GB mixed |
 |---|---:|---:|
-| Decode throughput | 104.7 tok/s | 105.3 tok/s |
-| Avg latency, 256 tokens | 2.445 s | 2.430 s |
-| Run-to-run spread (3 iters) | 0.35% | 1.66% |
-| **KV cache** | **156,981 tokens** | 46,802 tokens |
-| `--gpu-memory-utilization` | **0.85** | 0.92 |
-| Weights in VRAM | 5.59 GiB | 8.82 GiB |
-| CUDA graphs | 4.03 GiB | 3.62 GiB |
+| Single-stream (batch-1), median | **9.52 tok/s** | **9.51 tok/s** |
+| Single-stream, range (5 reps) | 9.48–9.84 tok/s | 9.45–9.81 tok/s |
+| Batch-8, median (aggregate) | **73.4 tok/s** | **74.4 tok/s** |
+| Batch-8, range (5 reps) | 72.2–74.9 tok/s | 72.8–75.7 tok/s |
+| Batch-8 scaling vs. batch-1 | 7.71× (96% of ideal 8×) | 7.82× (98% of ideal 8×) |
+| `--gpu-memory-utilization` | 0.85 | 0.92 |
 
-**Throughput is unchanged.** The 0.6% gap between checkpoints is smaller than the
-1.66% run-to-run spread of the mixed checkpoint alone. Removing the BF16
-exemptions does **not** make the model faster.
+**Throughput is still unchanged between checkpoints** — uniform and mixed land
+within run-to-run noise of each other at both batch sizes. That part of the
+original claim holds; only the absolute numbers were wrong.
 
-**KV cache capacity is 3.35× larger**, and the uniform build achieves that while
-requesting a *smaller* share of the GPU.
+**Batching is near-ideal, and that's a real finding, not just a corrected
+number.** 96–98% of theoretical linear scaling on a batch of 8 means the MoE
+decode step's per-step cost is not growing meaningfully with batch size —
+consistent with the earlier hypothesis (`RESEARCH.md`) that a MoE GEMM kernel
+falls back to a batch-independent generic tactic rather than a batch-aware one.
 
-**The two cannot be run at the same memory fraction on a 16 GB card.** The mixed
-checkpoint fails at `--gpu-memory-utilization 0.85` with
+**Variance dropped by roughly two orders of magnitude** once CUDA graphs were
+disabled — 3.6–3.9% spread across 5 independent process launches here, versus a
+previously documented 3.4× (340%) run-to-run swing under the CUDA-graph path.
+That instability was itself a symptom of this bug, not unrelated noise.
+
+**The two checkpoints cannot be run at the same memory fraction on a 16 GB
+card.** The mixed checkpoint fails at `--gpu-memory-utilization 0.85` with
 `ValueError: No available memory for the cache blocks`, and at `1.0` with
 `Free memory on device cuda:0 (14.66/15.92 GiB) ... less than desired` because a
 desktop session holds ~1.3 GiB. Its working range is narrow; the uniform build
-runs at 0.85 with headroom. This is the practical case for the smaller
-checkpoint — more so than the accuracy difference.
+runs at 0.85 with headroom — the practical case for the smaller checkpoint, more
+so than the accuracy difference.
 
-> **Conditions.** Warm compile cache. A cold cache measures the CUDA compiler,
-> not the model: ~198 s first load versus ~58 s warm on the same checkpoint.
-> Single-stream only — the batch-8 figure quoted elsewhere in this repo has not
-> been re-measured with this tool.
+> **Conditions.** GPU otherwise idle — Wallpaper Engine and browser GPU
+> acceleration closed before measuring; Wallpaper Engine alone previously
+> produced a 181% latency spread in this repo's benchmarks. `enforce_eager`
+> skips compile/graph-capture warmup entirely, so "cold vs. warm cache" does not
+> apply here the way it did under CUDA graphs. Measured 2026-08-14.
+
+**Retracted, do not cite:** 102.6 tok/s single-stream / 407.4 tok/s batch-8
+(CUDA graphs; coherent output was never verified at that speed).
 
 ### Paired evaluation
 
@@ -197,7 +259,7 @@ zaya1-godspeed/
 │   ├── build_calibration_data.py       # Calibration mix (incl. ARC/HellaSwag phase-2 mix)
 │   ├── fix_w4a4_global_scales.py       # Post-hoc global-scale convention repair
 │   ├── verify_w4a4_dequant.py          # Round-trip dequant vs HF reference (≈1% rel. error)
-│   ├── run_full_benchmarks.py          # lm-eval suite w/ CUDA graphs + chat template
+│   ├── run_full_benchmarks.py          # lm-eval suite w/ chat template (loglikelihood tasks; CUDA graphs are broken for generation, see Known Issue)
 │   ├── eval_gpqa_budget_forced.py      # s1-style budget forcing for GPQA-Diamond
 │   ├── eval_ifeval_budget_forced.py    # Two-stage budget forcing + official IFEval checkers
 │   ├── smoke_test_mixed_precision.py   # Load + coherence + speed gate
@@ -211,8 +273,10 @@ zaya1-godspeed/
 `RESEARCH.md` is the most useful document in this repo if you're trying to run
 NVFP4 W4A4 on your own SM120 card — it records the full chain of root causes:
 the w13 gate/up shard-split trap, the tied NVFP4 `lm_head` → `embed_tokens`
-bind, the bf16-only inference contract, the global-scale convention, and the
-CUDA-graph memory-profiler flag that silently eats 3.5 GB on a 16 GB card.
+bind, the bf16-only inference contract, the global-scale convention, the
+CUDA-graph memory-profiler flag that silently eats 3.5 GB on a 16 GB card, and
+the CUDA graph *capture* bug that corrupts generation outright (see
+[Known Issue](#known-issue-cuda-graph-capture-corrupts-output-on-sm120)).
 
 ## Reproduce
 

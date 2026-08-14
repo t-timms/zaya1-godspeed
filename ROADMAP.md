@@ -436,6 +436,72 @@ only if Phase A reveals a regression on a harder benchmark.
 > **Note:** `SESSION_HANDOFF.md` is gitignored and did not survive the
 > 2026-07-20 disk cleanup. This ROADMAP section replaces it.
 
+#### Session 17 — CUDA Graph Capture Bug Found; Throughput Figures Retracted (2026-08-14) 🔴🟢
+
+**The published 102.6 / 407.4 tok/s figures (Session 8) were measured with CUDA
+graphs enabled. Confirmed 2026-08-11–14: that path produces numerically wrong
+output on this card, independent of MoE backend.** Session 16's own line 395-396
+already flagged the 9.7 tok/s `enforce_eager` figure as "not comparable" to
+102.6 — this session establishes *why*, and which number is real.
+
+##### Backend sweep (2026-08-11, `zaya1-8b-nvfp4-w4a4-uniform`, greedy)
+
+| backend | with CUDA graphs |
+|---|---|
+| `flashinfer_cutlass` (default) | garbage |
+| `cutlass` | garbage |
+| `marlin` (weight-only) | garbage |
+| any backend, `enforce_eager=True` | ✅ coherent |
+
+Marlin is weight-only and barely touches the FP4 MoE path — it failing exactly
+like the native FP4 kernels means the bug is graph capture itself, not a kernel.
+Upstream: [CUTLASS #3096](https://github.com/NVIDIA/cutlass/issues/3096) is a
+different (non-graph-capture) bug with its own fix; [FlashInfer #2776](https://github.com/flashinfer-ai/flashinfer/issues/2776)
+is graph-capture-specific but its root cause (FlashInfer TRTLLM kernel memory
+alignment) wouldn't explain Marlin failing too. No upstream issue currently
+documents this exact combination — possibly worth filing.
+
+##### Coherence re-verification (2026-08-14)
+
+First attempt used `llm.generate()` with a raw prompt string (no chat template)
+and produced fluent-but-off-topic text — a test-harness mistake, not a second
+bug; ZAYA needs its chat template for generative output regardless of backend
+(see the existing chat-template gotcha elsewhere in this doc). Re-run via
+`llm.chat()` with `enforce_eager=True`: correct, on-topic, budget-appropriate
+chain-of-thought reasoning on all 3 test prompts (Rayleigh scattering correctly
+invoked for "why is the sky blue"; correctly distinguished RGB vs. CMY primary
+color systems). Confirms Session 16's 9.7 tok/s smoke-test speed was on the
+*correct* path all along — Session 8's 102.6 tok/s was not.
+
+##### Corrected throughput (5 process invocations per config, GPU idle, 2026-08-14)
+
+| | 6.02 GB uniform | 9.46 GB mixed |
+|---|---:|---:|
+| Single-stream, median (range) | **9.52** (9.48–9.84) tok/s | **9.51** (9.45–9.81) tok/s |
+| Batch-8, median (range) | **73.4** (72.2–74.9) tok/s | **74.4** (72.8–75.7) tok/s |
+| Batch-8 scaling vs. batch-1 | 7.71× (96% of ideal) | 7.82× (98% of ideal) |
+
+Near-ideal batch scaling is itself evidence for the open MoE-kernel hypothesis
+below (per-step cost not growing with batch size). Variance is 3.6–3.9% across
+independent process launches — versus the previously documented 3.4× (340%)
+swing under CUDA graphs, which was a symptom of this same bug, not separate
+noise. Full detail and citations: `README.md` → "Known Issue: CUDA graph
+capture corrupts output on SM120".
+
+##### Open question, now sharper
+
+The ~10× TPOT gap flagged in earlier sessions (`trtllm::fused_moe::gemm2`
+skipping all tactics) is not resolved by this fix — `enforce_eager` avoids the
+*correctness* bug but decode is still slow in absolute terms. Near-linear
+batch-8 scaling (above) is consistent with a batch-independent per-step
+overhead, which narrows the search but doesn't close it.
+
+##### Downstream corrections applied this session
+
+Both HF model cards, the GitHub profile README, and the portfolio site all
+quoted 102.6/407.4 tok/s and have been corrected to match this table — tracked
+so the numbers don't drift back out of sync on the next edit.
+
 #### Engineering Cleanup — Session 15 Action Items ⬜
 
 The following items were identified as unprofessional shortcuts during session 15.

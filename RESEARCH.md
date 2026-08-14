@@ -961,6 +961,55 @@ where to look next but does not close the question.
 with `enforce_eager=True`. Thirty seconds. Would have saved the confusion in
 §5.13's harness-artifact chase and the retracted throughput figures both.
 
+### 5.15 Marlin Does Not Close the TPOT Gap — the "10×" Framing Itself Was Unsound (2026-08-14)
+
+**Headline: swapping to the Marlin MoE backend does not fix the speed. That's a
+real negative result, and it exposes a bigger problem — the "~10× gap" this
+section chased was measured against a baseline that was never valid.**
+
+**Test:** same rigor as §5.14's corrected throughput table — 5 process
+invocations, `enforce_eager=True`, uniform checkpoint, batch-1 and batch-8 —
+with `--moe-backend marlin` instead of the default (`FLASHINFER_CUTLASS`,
+auto-selected). Coherence re-verified via `llm.chat()` first (correct,
+on-topic; the France prompt this time explicitly stated "France's capital is
+Paris").
+
+| | default backend | marlin |
+|---|---:|---:|
+| batch-1, median | 9.52 tok/s | 9.69 tok/s |
+| batch-8, median | 73.4 tok/s | 72.75 tok/s |
+
+The difference (1.8% / 0.9%) is inside the ~3.6–3.9% run-to-run noise already
+established for this measurement setup. **Statistically indistinguishable.**
+Marlin's dequant-matvec kernel and the TMA-warp-specialized grouped-GEMM path
+are architecturally unrelated — one landing exactly where the other does is
+evidence *against* "wrong tactic chosen for a tiny-M grouped GEMM" as a fixable
+software bug, and evidence *for* something more structural: 80 layers of
+weight loads + kernel-launch overhead at effectively M≈1 per expert, which may
+be close to the real cost of this architecture on this hardware rather than a
+bug with a kernel-swap fix.
+
+**The bigger issue this surfaces:** the "~10× TPOT gap" language (§5.14, and
+[[session_zaya_bench_2026-08-10]] before it) was always stated relative to the
+9.75 ms/token implied by the **102.6 tok/s figure — which is the same number
+this project retracted for being measured on a numerically broken CUDA-graph
+path.** A code path producing wrong output has no guaranteed relationship to
+how much correct work it was actually doing; it may have been doing *less*,
+not the same work faster. **There is no established evidence the "expected"
+speed this gap was measured against was ever real.** Absent a trustworthy
+reference point, "~9.5–9.7 tok/s might just be the honest speed of this
+architecture on this card" is at least as well-supported by current evidence
+as "there is a fixable ~10× gap" — this section should stop asserting the
+latter as settled.
+
+**What would actually resolve this:** an independent reference speed for
+top-1-routed MoE decode at this shape (2048 hidden, 4096 FFN, 16 experts) on
+SM120, from a source that isn't this project's own retracted number — e.g. a
+llama.cpp GGUF build of ZAYA1 (§ecosystem survey, 2026-08-14: `Abiray/ZAYA1-8B-GGUF`,
+2,127 downloads, no throughput published) benchmarked directly, or NVIDIA's
+own MoE kernel benchmarks at comparable shapes. Neither has been done. Until
+one is, "TPOT gap" is a retired framing, not an open bug.
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)
@@ -1174,9 +1223,12 @@ moves accuracy.
 - Add IFEval (or another free-generation eval) to the standard accuracy suite
   permanently — loglikelihood-only evaluation is why the graph-capture bug went
   undetected for months (§5.14).
-- The ~10× TPOT gap (`trtllm::fused_moe::gemm2` skipping all tactics, §5.12.7)
-  is still open; the near-linear batch-8 scaling measured under
-  `enforce_eager` narrows but doesn't close it.
+- ~~The ~10× TPOT gap is still open~~ — **retired 2026-08-14 (§5.15):** Marlin
+  landed statistically identical to the default backend, and the "10×"
+  framing itself was measured against the retracted 102.6 tok/s figure. If a
+  real reference speed ever surfaces (independent llama.cpp GGUF benchmark,
+  NVIDIA kernel numbers at this shape), re-open the question against that —
+  not against this project's own prior number.
 
 ### ⬜ Publication
 

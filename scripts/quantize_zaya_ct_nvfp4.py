@@ -50,6 +50,7 @@ import gc
 import json
 import logging
 import os
+import statistics
 import sys
 import time
 from collections.abc import Callable
@@ -854,25 +855,80 @@ def calibrate_input_global_scales_layerwise(
 
     missing = []
     set_count = 0
+    set_scales: dict[str, float] = {}
     for name, mod in target_modules:
         max_act = activation_max.get(name, 0.0)
         if max_act <= 0:
-            missing.append(name)
+            missing.append((name, mod))
             continue
         base_scale = GLOBAL_SCALE_NUM / max_act
         # Use MSE-optimized scale if available, else fall back to max-abs
         scale = optimized_scales.get(name, base_scale)
         mod.input_global_scale = _torch.nn.Parameter(_torch.tensor(scale, dtype=_torch.float32), requires_grad=False)
+        set_scales[name] = scale
         set_count += 1
 
+    # An uncalibrated module keeps input_global_scale = 0, which makes its
+    # block_scale (igs * vec_max / 6) zero and produces NaN/garbage logits the
+    # moment that expert is routed to at inference. That corruption is SILENT —
+    # the run exits 0 and writes a correctly-sized checkpoint. It cost a full
+    # debugging session on 2026-08-15 (checkpoint scored at chance level with
+    # byte-identical weights). Repair inline instead of emitting a broken
+    # checkpoint: borrow the median scale from calibrated peers in the same
+    # layer with the same Linear type, widening the layer radius if needed.
+    # Same fallback logic as scripts/fix_uncalibrated_igs.py, applied at the
+    # source so a bad checkpoint can never be written in the first place.
+    if missing:
+        logger.warning(
+            "Missing activation observations on %d/%d modules — repairing with "
+            "per-layer median fallback (first few: %s)",
+            len(missing),
+            len(target_modules),
+            [n for n, _ in missing[:5]],
+        )
+        peers: dict[tuple[int | None, str], list[float]] = {}
+        for name, scale in set_scales.items():
+            fc_type = "linear_fc1" if "linear_fc1" in name else ("linear_fc2" if "linear_fc2" in name else "other")
+            peers.setdefault((_extract_layer_idx(name), fc_type), []).append(scale)
+
+        repaired = 0
+        for name, mod in missing:
+            layer_idx = _extract_layer_idx(name)
+            fc_type = "linear_fc1" if "linear_fc1" in name else ("linear_fc2" if "linear_fc2" in name else "other")
+            candidates: list[float] = []
+            # Widen the search radius until same-type peers are found.
+            for radius in range(0, 9):
+                for probe in {layer_idx, (layer_idx or 0) - radius, (layer_idx or 0) + radius}:
+                    candidates.extend(peers.get((probe, fc_type), []))
+                if candidates:
+                    break
+            if not candidates:  # last resort: any calibrated module of this type
+                for (_, ft), vals in peers.items():
+                    if ft == fc_type:
+                        candidates.extend(vals)
+            if not candidates:
+                logger.error("Cannot repair input_global_scale for %s — no calibrated peers", name)
+                continue
+            fallback = float(statistics.median(candidates))
+            mod.input_global_scale = _torch.nn.Parameter(
+                _torch.tensor(fallback, dtype=_torch.float32), requires_grad=False
+            )
+            repaired += 1
+        logger.warning("Repaired input_global_scale on %d/%d uncalibrated modules", repaired, len(missing))
+        if repaired < len(missing):
+            raise RuntimeError(
+                f"{len(missing) - repaired} modules have no usable input_global_scale and could not be "
+                "repaired. Writing this checkpoint would produce silent NaN corruption at inference. "
+                "Check the calibration data covers every expert."
+            )
+        set_count += repaired
+
     logger.info(
-        "Set input_global_scale on %d/%d Linears (%d had zero activations)",
+        "Set input_global_scale on %d/%d Linears (%d repaired from uncalibrated)",
         set_count,
         len(target_modules),
         len(missing),
     )
-    if missing:
-        logger.warning("Missing observations on %d modules — first few: %s", len(missing), missing[:5])
 
     return activation_max
 

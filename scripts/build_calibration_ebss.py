@@ -47,6 +47,11 @@ DEFAULT_OUTPUT = (
 
 NUM_EXPERTS = 16  # ZAYA1-8B: 16 experts per MoE layer, top-1 routing
 
+# Selection is without replacement, so a healthy run is ~100% unique. Anything
+# far below that means the selection loop is degenerate — see the diversity
+# guard before the output is written.
+MIN_UNIQUE_ROW_FRACTION = 0.90
+
 
 # ─────────────────────────────────────────────────────────────────
 # Router weight extraction
@@ -258,6 +263,15 @@ def ebss_resample(
 
     selected: list[int] = []
     cumulative_coverage = torch.zeros(num_experts, dtype=torch.float32)
+    # Selection is WITHOUT replacement. The original implementation never masked
+    # already-picked samples and relied on the inv_coverage reweighting to make
+    # them unattractive — but once coverage reaches the thousands, 1/(1+coverage)
+    # shrinks near-proportionally for every expert, so the relative ranking
+    # between samples barely moves and the same argmax wins every round. On
+    # 2026-08-15 that produced a corpus of 977 rows containing 3 unique samples
+    # (one repeated 972×, 738 unique token ids vs 28,397), which under-observed
+    # activation maxima by ~40% and silently corrupted the resulting checkpoint.
+    already_picked = torch.zeros(n_samples, dtype=torch.bool)
 
     for step in range(target_n):
         # Score each sample: benefit = sum of (1 / (1 + coverage[e])) × sample_expert_totals[s, e]
@@ -267,8 +281,19 @@ def ebss_resample(
 
         # Pick best (add small noise to break ties deterministically)
         noise = torch.rand(n_samples) * 1e-6
-        best_idx = int((scores + noise).argmax().item())
+        candidate = scores + noise
+        candidate[already_picked] = float("-inf")
+        if not torch.isfinite(candidate).any():
+            # Exhausted the corpus: target_n > N. Stop rather than repeat.
+            logger.warning(
+                "Corpus exhausted after %d of %d requested samples — returning without repetition.",
+                len(selected),
+                target_n,
+            )
+            break
+        best_idx = int(candidate.argmax().item())
         selected.append(best_idx)
+        already_picked[best_idx] = True
 
         # Update cumulative coverage
         cumulative_coverage += sample_expert_totals[best_idx]
@@ -374,6 +399,30 @@ def main() -> int:
         imbalance_before,
         imbalance_after,
     )
+
+    # ── Diversity guard ────────────────────────────────────────
+    # A degenerate corpus (the same row repeated) under-observes activation
+    # maxima, which calibrates input_global_scale too high and silently
+    # corrupts the resulting checkpoint — the failure is invisible until an
+    # eval scores at chance level. Refuse to write one. See the 2026-08-15
+    # incident: 3 unique rows out of 977, one repeated 972 times.
+    unique_rows = len({tuple(row.tolist()) for row in resampled})
+    unique_frac = unique_rows / resampled.shape[0]
+    logger.info(
+        "Diversity check: %d/%d unique rows (%.1f%%), %d unique token ids",
+        unique_rows,
+        resampled.shape[0],
+        100 * unique_frac,
+        len(torch.unique(resampled)),
+    )
+    if unique_frac < MIN_UNIQUE_ROW_FRACTION:
+        raise RuntimeError(
+            f"EBSS produced a degenerate corpus: only {unique_rows}/{resampled.shape[0]} "
+            f"rows are unique ({100 * unique_frac:.1f}%, floor is "
+            f"{100 * MIN_UNIQUE_ROW_FRACTION:.0f}%). Quantizing against this would "
+            "under-observe activation maxima and silently corrupt the checkpoint. "
+            "Refusing to write."
+        )
 
     # ── Save output ────────────────────────────────────────────
     out_path = Path(args.output)

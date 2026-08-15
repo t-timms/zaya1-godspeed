@@ -81,6 +81,12 @@ def main() -> int:
     ap.add_argument("--top-p", type=float, default=0.95, dest="top_p")
     ap.add_argument("--max-model-len", type=int, default=8192, dest="max_model_len")
     ap.add_argument("--output", default="results/gsm8k_budget_forced.json")
+    # Exposed so a multi-seed variance check is possible. The Wilson interval
+    # reported below covers item-sampling uncertainty only; it says nothing
+    # about generation stochasticity at temperature > 0. Quantifying that needs
+    # repeat runs at different seeds (this repo's own rule: n=1 is not a
+    # result), which is why the knob exists even though the default is fixed.
+    ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
     from datasets import load_dataset
@@ -118,7 +124,7 @@ def main() -> int:
         top_p=args.top_p,
         max_tokens=args.think_budget,
         stop=["</think>", "</s>"],
-        seed=42,
+        seed=args.seed,
     )
     think_outs = llm.generate(base_prompts, sp_think)
     closed = sum(o.outputs[0].stop_reason == "</think>" for o in think_outs)
@@ -177,7 +183,7 @@ def main() -> int:
                 "max_model_len": args.max_model_len,
                 "temperature": args.temp,
                 "top_p": args.top_p,
-                "seed": 42,
+                "seed": args.seed,
                 "correct": correct,
                 "accuracy": acc,
                 "accuracy_ci95": [ci_lo, ci_hi],

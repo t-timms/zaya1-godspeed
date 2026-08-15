@@ -1268,6 +1268,111 @@ a build-time change, not a runtime flag, and a substantially bigger lift
 than today's two quick tests. Worth a dedicated session if this bug is
 revisited; not attempted here given the time budget.
 
+### 5.20 EBSS Is a No-Op for This Pipeline — and Its Implementation Was Silently Corrupting Checkpoints (2026-08-15)
+
+**Two findings, one session: a real implementation bug that silently produced
+a broken checkpoint, and — after fixing it — proof that the technique cannot
+help this pipeline at all.**
+
+#### What happened
+
+Regenerated EBSS-rebalanced calibration data (§5.12.4) and requantized the
+uniform checkpoint with it, SOAR enabled, same `--no-bf16-exempt` methodology
+as the published build. **The run exited 0 with no errors** and wrote a
+correctly-sized 6.02 GB checkpoint. Paired lm-eval against the published
+checkpoint:
+
+| task | published (healthy) | SOAR+EBSS | random baseline |
+|---|---:|---:|---:|
+| hellaswag acc_norm | 60.29% | **25.75%** | 25% |
+| arc_challenge acc | 35.75% | **25.17%** | 25% |
+| piqa acc | 68.93% | **55.06%** | 50% |
+| winogrande acc | 57.70% | **49.72%** | 50% |
+
+Chance level on three of four tasks. Generation confirmed total incoherence
+(`"Western courage Worker Assign Worker socialization Hudson exclude⅙⅙…"` for
+"name three primary colors") — under `enforce_eager=True`, so *not* the
+§5.14 CUDA-graph bug.
+
+#### Root cause, isolated in three steps
+
+1. **Weights were byte-identical.** Sampled `weight_packed`, `weight_scale`,
+   and `weight_global_scale` across both checkpoints: identical everywhere.
+   Only `input_global_scale` differed (59 of 60 sampled). Weight quantization
+   is computed from the weights, not from activations, so this was expected —
+   and it narrowed the fault to activation calibration alone.
+
+2. **IGS was systematically inflated.** `IGS = 2688 / max_act`, so a higher
+   IGS means a *lower* observed activation maximum. Across all 1,320 modules:
+   **95.8% had higher IGS in the broken checkpoint, median ratio 1.68×**,
+   implying EBSS observed activation maxima only **~60% as large** (p10: 30%)
+   as the original corpus. Calibrating the representable FP4 range ~40% too
+   small means real activations saturate at inference — exactly the observed
+   corruption, with identical weights.
+
+3. **The calibration corpus was degenerate.** Comparing the two tensors
+   directly:
+
+   | | original arcmix | EBSS output |
+   |---|---:|---:|
+   | unique rows | 977 / 977 (100%) | **3 / 977 (0.3%)** |
+   | most-repeated row | 1× | **972×** |
+   | unique token ids | 28,397 | **738** |
+
+   `ebss_resample()` selected essentially one sample and repeated it 972
+   times. The greedy loop appended `best_idx` but **never masked it from
+   subsequent rounds**, relying on the `1/(1+coverage)` reweighting to
+   discourage re-selection. Once coverage reaches the thousands that term
+   shrinks near-proportionally for every expert, so the relative ranking
+   between samples barely moves and the same argmax wins every iteration.
+
+   This also explains the two side-effects seen at quantization time: the
+   modules with zero activation observations (that single repeated sample
+   never routes to layer 71 / expert 15), and the "imbalance ratio improved
+   0.04 → 0.06" line — that metric was measuring coverage of a degenerate
+   set, so it was meaningless.
+
+#### The deeper result: EBSS cannot help this pipeline
+
+After fixing the selection to sample **without replacement**, the rerun
+produced 977/977 unique rows and 28,397 unique token ids — and **expert
+coverage identical to the original, imbalance ratio 0.04 → 0.04, unchanged.**
+
+That is not a disappointing outcome, it is the arithmetic: selecting `N`
+samples without replacement from a corpus of `N` is a permutation of the
+whole corpus, and coverage is a sum over all samples. More fundamentally,
+`activation_max` is accumulated as a **running max over every calibration
+token** — an order- and frequency-independent statistic. **No reweighting or
+reordering of a fixed corpus can change a max.** EBSS could only matter if
+`target_n < N` (a strict subset), and for max-based calibration a subset is
+strictly worse: fewer samples can only lower the observed maximum, which is
+the exact failure mode that corrupted the checkpoint here.
+
+MoEQuant's EBSS targets calibration schemes where sample *frequency* carries
+signal — fitted statistics like GPTQ Hessians or percentile-based scales.
+This pipeline's activation calibration is a pure max, so the technique is
+inapplicable by construction. **EBSS is closed as a lever for this project**,
+independent of the bug.
+
+#### Fixes shipped
+
+- `build_calibration_ebss.py`: selection is now without replacement, and a
+  **diversity guard refuses to write** a corpus below 90% unique rows rather
+  than emitting one that silently corrupts downstream quantization.
+- `quantize_zaya_ct_nvfp4.py`: an uncalibrated module previously left
+  `input_global_scale = 0` and logged a warning — which makes `block_scale`
+  zero and yields NaN/garbage the moment that expert is routed to. It now
+  **repairs inline** with a same-layer/same-type median fallback (the logic
+  `fix_uncalibrated_igs.py` applies post-hoc, moved to the source) and
+  **raises** if any module cannot be repaired. A silently-broken checkpoint
+  can no longer be written.
+
+**Process note worth keeping:** the run exited 0, wrote a correctly-sized
+checkpoint, and passed every structural check. Only a real accuracy eval
+caught it. This is the second time in two sessions that "exit code 0" meant
+nothing (§5.14 was the first) — judge these runs by measured behaviour, never
+by process status.
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)

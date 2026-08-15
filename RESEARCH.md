@@ -1217,10 +1217,56 @@ speculative decoding settings... Consider increasing max_num_batched_tokens`
 which could add further gains on top of or instead of n-gram, particularly
 for the free-form-generation case this doesn't help.
 
-**Infrastructure note:** `~/scripts/vllm-serve.sh` is not under version
-control (confirmed — no git repo at `~/scripts`). This fix, and the whole
-script, would be lost if this WSL environment were ever rebuilt. Flagged, not
-resolved — a separate decision, not part of this finding.
+**Infrastructure note, resolved same day:** `~/scripts/vllm-serve.sh` has
+since been brought under version control (private repo
+[t-timms/machine-scripts](https://github.com/t-timms/machine-scripts)), and
+the exact validated serve configuration is now also published in this repo as
+`scripts/serve.sh` so downloaders get the same win, not just the private
+machine.
+
+### 5.19 TRITON_ATTN Does Not Fix CUDA Graph Correctness Either — a Second Axis Ruled Out (2026-08-14)
+
+**Negative result, but a valuable one: this project's CUDA-graph correctness
+bug (§5.14) now fails across two independent configuration axes, not one.**
+
+§5.14's original sweep varied the **MoE backend**
+(`flashinfer_cutlass`/`cutlass`/`marlin`) and found all three produce garbage
+under graph capture. It never varied the separate **attention backend**
+(`FLASHINFER`/`TRITON_ATTN`) — a genuinely different code path.
+
+Motivation for testing it: a public vLLM issue
+([#41651](https://github.com/vllm-project/vllm/issues/41651)) describes an
+SM120-specific bug with an unnervingly close signature — FlashInfer attention
++ FP8 KV cache + CUDA graphs producing random output, specifically on *long*
+prompts, with `TRITON_ATTN` reported as a working switch that preserves CUDA
+graphs. ZAYA1 is a long-reasoning model: even a short user prompt like "name
+three primary colors" produces a long effective context once the `<think>`
+trace grows, which plausibly matches that "long prompt" trigger.
+
+**Test:** `attention_backend="TRITON_ATTN"`, `enforce_eager=False` (CUDA
+graphs on), same checkpoint, same greedy "name three primary colors" prompt
+used in the original §5.14 diagnosis.
+
+**Result: graph capture succeeded cleanly this time (35/35 graphs captured,
+no crash/hang) — but output was still garbage** (`"sariant vessel"`, nowhere
+near a coherent answer). TRITON_ATTN does not fix this project's bug.
+
+**What this rules out:** the bug is not tied to one specific attention
+kernel any more than §5.14 showed it isn't tied to one specific MoE kernel.
+Two independent axes, four total kernel combinations, all fail identically
+under graph capture, all succeed under `enforce_eager=True`. This is
+stronger evidence that the fault is in graph capture itself for this
+model/hardware/driver/WSL combination — not a swappable kernel choice.
+`enforce_eager=True` remains the only known fix.
+
+**Not pursued further today:** a separate, larger lead exists —
+[CUTLASS #3096](https://github.com/NVIDIA/cutlass/issues/3096) (already
+cited in this project's docs) documents a real fix for SM120 NVFP4 MoE
+grouped-GEMM garbage output, but it requires rebuilding FlashInfer with
+`compute_120f` instead of `compute_120a` (CUDA 13.0+, 10+ patched files) —
+a build-time change, not a runtime flag, and a substantially bigger lift
+than today's two quick tests. Worth a dedicated session if this bug is
+revisited; not attempted here given the time budget.
 
 ### 6.1 Audited Repositories
 

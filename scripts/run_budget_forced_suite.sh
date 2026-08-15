@@ -99,10 +99,29 @@ run_stage() {
     echo "[$name] OK   $(( (t1 - t0) / 60 ))m  (exit $rc, artifact valid)" | tee -a "$SUMMARY"
     "$PY" - "$artifact" <<'PYEOF' | tee -a "$SUMMARY"
 import json, sys
+
 d = json.load(open(sys.argv[1]))
-keys = ("accuracy", "pass_at_1", "n", "self_closed_think",
-        "hit_think_budget_ceiling", "recovered_by_trace_fallback")
-print("        " + "  ".join(f"{k}={d[k]}" for k in keys if k in d))
+n = d.get("n", 0)
+
+# Lead with the headline metric *and its interval* on one line. A point
+# estimate alone is not interpretable: 15/20 reads as 75% but is really
+# [53.1, 88.8], and a 75-vs-80 pair from this suite tested at p=1.0000.
+for metric, ci_key in (("accuracy", "accuracy_ci95"), ("pass_at_1", "pass_at_1_ci95")):
+    if metric in d:
+        line = f"        {metric}={d[metric] * 100:.1f}%"
+        ci = d.get(ci_key)
+        if ci:
+            line += f"  95% CI [{ci[0] * 100:.1f}, {ci[1] * 100:.1f}]"
+        line += f"  n={n}"
+        print(line)
+
+diag = ("self_closed_think", "hit_think_budget_ceiling", "recovered_by_trace_fallback")
+present = [f"{k}={d[k]}" for k in diag if k in d]
+if present:
+    print("        " + "  ".join(present))
+    ceiling = d.get("hit_think_budget_ceiling")
+    if ceiling is not None and n and ceiling / n > 0.9:
+        print(f"        NOTE: {ceiling}/{n} hit the think-budget ceiling — consider a larger --think-budget")
 PYEOF
   else
     echo "[$name] FAIL $(( (t1 - t0) / 60 ))m  (exit $rc, no valid artifact) - see $log" | tee -a "$SUMMARY"

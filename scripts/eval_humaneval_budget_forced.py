@@ -41,6 +41,21 @@ os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 DEFAULT_MODEL = "./zaya1-8b-nvfp4-w4a4-arcbase"
 
 
+def wilson_ci(correct: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a binomial proportion.
+
+    HumanEval is only 164 problems, so a bare pass@1 carries a wide interval
+    that a point estimate hides — worth showing next to the number.
+    """
+    if n == 0:
+        return (0.0, 0.0)
+    p = correct / n
+    denom = 1 + z**2 / n
+    center = (p + z**2 / (2 * n)) / denom
+    half = z / denom * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5)
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
 def extract_code(response: str, doc_prompt: str) -> str:
     """Mirror lm-eval's humaneval_instruct build_predictions_instruct: take the
     fenced code block if present, otherwise the raw text, and prepend the
@@ -143,7 +158,11 @@ def main() -> int:
     print("\n" + "=" * 72)
     print(f"BUDGET-FORCED HumanEval  (n={len(docs)}, think_budget={args.think_budget})")
     print("=" * 72)
-    print(f"pass@1: {pass_at_1['pass@1'] * 100:.1f}%  ({correct}/{len(docs)})")
+    ci_lo, ci_hi = wilson_ci(correct, len(docs))
+    print(
+        f"pass@1: {pass_at_1['pass@1'] * 100:.1f}%  ({correct}/{len(docs)})"
+        f"  95% CI [{ci_lo * 100:.1f}, {ci_hi * 100:.1f}]"
+    )
     print(f"self-closed </think> within budget: {closed}/{len(docs)}")
 
     out_path = Path(args.output)
@@ -159,6 +178,7 @@ def main() -> int:
                 "top_p": args.top_p,
                 "seed": 42,
                 "pass_at_1": pass_at_1["pass@1"],
+                "pass_at_1_ci95": [ci_lo, ci_hi],
                 "correct": correct,
                 "self_closed_think": closed,
                 "per_task": per_task,

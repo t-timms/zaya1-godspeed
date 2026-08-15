@@ -49,6 +49,23 @@ CHOICES = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
 _ANSWER_RE = re.compile(r"answer is \(?([ABCDEFGHIJ])\)?")
 
 
+def wilson_ci(correct: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a binomial proportion.
+
+    A bare accuracy number is not interpretable on its own, and this matters
+    more here than elsewhere: the default run is a 700-item stratified subset
+    of 12,032, so the sampling error is real and should be visible next to the
+    point estimate.
+    """
+    if n == 0:
+        return (0.0, 0.0)
+    p = correct / n
+    denom = 1 + z**2 / n
+    center = (p + z**2 / (2 * n)) / denom
+    half = z / denom * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5)
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
 def extract_letter(text: str) -> str | None:
     m = _ANSWER_RE.search(text)
     if m:
@@ -161,7 +178,8 @@ def main() -> int:
         print(f"{subj:<20} {len(vals):>5} {sum(vals) / len(vals) * 100:>6.1f}%")
     print("-" * 72)
     acc = correct / len(docs)
-    print(f"overall accuracy: {correct}/{len(docs)} = {acc * 100:.1f}%")
+    ci_lo, ci_hi = wilson_ci(correct, len(docs))
+    print(f"overall accuracy: {correct}/{len(docs)} = {acc * 100:.1f}%  95% CI [{ci_lo * 100:.1f}, {ci_hi * 100:.1f}]")
     print(f"self-closed </think> within budget: {closed}/{len(docs)}")
     print("random baseline: 10.0%   (10-way multiple choice)")
 
@@ -180,6 +198,7 @@ def main() -> int:
                 "seed": 42,
                 "correct": correct,
                 "accuracy": acc,
+                "accuracy_ci95": [ci_lo, ci_hi],
                 "self_closed_think": closed,
                 "by_subject": {s: {"n": len(v), "accuracy": sum(v) / len(v)} for s, v in by_subject_correct.items()},
                 "per_question": [

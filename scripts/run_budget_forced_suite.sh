@@ -27,9 +27,20 @@ MODEL="${MODEL:-./zaya1-8b-nvfp4-w4a4-arcbase}"
 THINK_BUDGET="${THINK_BUDGET:-4096}"
 MMLU_N="${MMLU_N:-700}"          # stratified subset; -1 for the full 12,032
 PY="${PY:-$HOME/vllm-env/bin/python3}"
-RESULTS_DIR="${RESULTS_DIR:-results/budget_forced}"
-LOG_DIR="${LOG_DIR:-$RESULTS_DIR/logs}"
 FORCE="${FORCE:-0}"
+# SMOKE_N caps every stage to N items and redirects output to a separate
+# directory. Use it to verify the orchestration end-to-end (~10 min) before
+# committing to a multi-hour run — the plumbing is what fails at 3am, not the
+# maths. Smoke artifacts never collide with real ones.
+SMOKE_N="${SMOKE_N:-}"
+
+if [ -n "$SMOKE_N" ]; then
+  RESULTS_DIR="${RESULTS_DIR:-results/budget_forced_smoke}"
+  MMLU_N="$SMOKE_N"
+else
+  RESULTS_DIR="${RESULTS_DIR:-results/budget_forced}"
+fi
+LOG_DIR="${LOG_DIR:-$RESULTS_DIR/logs}"
 
 mkdir -p "$RESULTS_DIR" "$LOG_DIR"
 
@@ -41,6 +52,9 @@ echo "suite start   : $(date -Is)"        | tee "$SUMMARY"
 echo "model         : $MODEL"             | tee -a "$SUMMARY"
 echo "think budget  : $THINK_BUDGET"      | tee -a "$SUMMARY"
 echo "mmlu subset n : $MMLU_N"            | tee -a "$SUMMARY"
+if [ -n "$SMOKE_N" ]; then
+  echo "MODE          : SMOKE (n=$SMOKE_N per stage) — results are NOT publishable" | tee -a "$SUMMARY"
+fi
 echo "" | tee -a "$SUMMARY"
 
 # Environment fingerprint - a stack change with unchanged numbers still
@@ -97,15 +111,20 @@ PYEOF
   echo "" | tee -a "$SUMMARY"
 }
 
+# In smoke mode every stage is capped; otherwise HumanEval and GSM8K run their
+# full sets and only MMLU-Pro takes a subset (it is 12,032 items).
+SMOKE_ARG=()
+[ -n "$SMOKE_N" ] && SMOKE_ARG=(--n "$SMOKE_N")
+
 # Cheapest first: a partial run still leaves the most results on disk.
 run_stage humaneval scripts/eval_humaneval_budget_forced.py \
-  "$RESULTS_DIR/humaneval-${TAG}.json"
+  "$RESULTS_DIR/humaneval-${TAG}.json" "${SMOKE_ARG[@]}"
 
 run_stage mmlu_pro scripts/eval_mmlu_pro_budget_forced.py \
   "$RESULTS_DIR/mmlu_pro-${TAG}.json" --n "$MMLU_N"
 
 run_stage gsm8k scripts/eval_gsm8k_budget_forced.py \
-  "$RESULTS_DIR/gsm8k-${TAG}.json"
+  "$RESULTS_DIR/gsm8k-${TAG}.json" "${SMOKE_ARG[@]}"
 
 echo "suite end     : $(date -Is)" | tee -a "$SUMMARY"
 echo "summary       : $SUMMARY"    | tee -a "$SUMMARY"

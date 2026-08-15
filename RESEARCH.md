@@ -1452,6 +1452,39 @@ Sampling follows Zyphra's published recommendation (temperature 0.6, top_p
 0.95 — their agent/code setting; they suggest 1.0 for general use), fixed
 seed 42, recorded in every result artifact.
 
+#### Contamination: read GSM8K and MMLU-Pro results differently
+
+These three benchmarks do not carry equal evidential weight, and the
+difference is worth stating rather than presenting one aggregate table:
+
+- **GSM8K is substantially contaminated and largely saturated.** Removing
+  contaminated examples from its test set has been shown to drop accuracy by
+  **up to 13 points** for some models — meaning a meaningful share of any
+  high score reflects training-set overlap rather than reasoning. A GSM8K
+  number here is a *sanity check that quantization did not break arithmetic
+  reasoning*, not evidence of mathematical ability.
+- **MMLU-Pro was purpose-built as the contamination-resistant successor to
+  MMLU**, which makes it the strongest of the three as an accuracy signal.
+- **HumanEval** has no published BF16 baseline for this model and is only 164
+  problems, so its confidence interval is wide by construction — see the
+  Wilson interval now reported alongside every result.
+
+Corollary for anything published from these runs: lead with MMLU-Pro, treat
+GSM8K as a regression check, and never report a bare point estimate without
+its interval.
+
+#### Every result now carries an interval
+
+A bare accuracy is not interpretable, and this project has already been
+misled by one: 75% vs 80% on the think-budget sweep looked like a real gain
+and tested at **p = 1.0000**. All three scripts now print and store a **95%
+Wilson score interval** next to the point estimate (Wilson rather than the
+normal approximation because it stays sensible at small n and near 0/1,
+which the subset runs hit). This matches the standard lm-eval reports and
+follows the reproducible-evaluation guidance in
+[Biderman et al., *Lessons from the Trenches on Reproducible Evaluation of
+Language Models*](https://arxiv.org/pdf/2405.14782).
+
 #### Tooling shipped
 
 - `scripts/run_budget_forced_suite.sh` — runs all three unattended, one

@@ -48,6 +48,23 @@ def extract_number(text: str) -> str | None:
     return raw.replace(",", "").replace("$", "").rstrip(".")
 
 
+def wilson_ci(correct: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a binomial proportion.
+
+    A bare accuracy number is not interpretable on its own — 75% vs 80% on
+    n=20 looks like a difference and is not (that pair tested at p=1.0000).
+    Wilson rather than the normal approximation because it stays sensible at
+    small n and near 0/1, which subset runs hit.
+    """
+    if n == 0:
+        return (0.0, 0.0)
+    p = correct / n
+    denom = 1 + z**2 / n
+    center = (p + z**2 / (2 * n)) / denom
+    half = z / denom * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5)
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
 def gold_answer(answer_field: str) -> str:
     # GSM8K gold answers are "<reasoning> #### <number>"; lm-eval strips
     # everything up to and including "#### " and any trailing period/commas.
@@ -142,7 +159,8 @@ def main() -> int:
         print(f"... ({len(rows) - 20} more rows in the JSON output)")
     print("-" * 72)
     acc = correct / len(docs)
-    print(f"accuracy: {correct}/{len(docs)} = {acc * 100:.1f}%")
+    ci_lo, ci_hi = wilson_ci(correct, len(docs))
+    print(f"accuracy: {correct}/{len(docs)} = {acc * 100:.1f}%  95% CI [{ci_lo * 100:.1f}, {ci_hi * 100:.1f}]")
     print(f"self-closed </think> within budget: {closed}/{len(docs)}")
     print(f"recovered by trace fallback (forced answer had no number): {extraction_failures}/{len(docs)}")
     truncated = sum(1 for _, _, _, nt in rows if nt >= args.think_budget)
@@ -162,6 +180,7 @@ def main() -> int:
                 "seed": 42,
                 "correct": correct,
                 "accuracy": acc,
+                "accuracy_ci95": [ci_lo, ci_hi],
                 "self_closed_think": closed,
                 "recovered_by_trace_fallback": extraction_failures,
                 "hit_think_budget_ceiling": truncated,

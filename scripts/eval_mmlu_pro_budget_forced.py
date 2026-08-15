@@ -1,5 +1,16 @@
 """Budget-forced MMLU-Pro for ZAYA1-8B W4A4 on 16 GB VRAM.
 
+Why not the standard tool: lm-eval-harness supports reasoning models via
+`think_end_token`, but it only strips post-hoc — `generation.split(tok)[-1]` —
+so a model that never emits `</think>` within budget has its whole
+unterminated trace scored as the answer. ZAYA1 frequently does not close its
+think block, so this implements actual budget *forcing* instead.
+
+Zyphra publishes a BF16 MMLU-Pro figure of 74.2, but states only that "all
+numbers are run on the Zyphra evaluation harness" — a private harness with
+undisclosed generation limits and prompting. Treat any comparison against it
+as indicative, not a reproduction.
+
 Same protocol as scripts/eval_gpqa_budget_forced.py, extended to MMLU-Pro's
 10-way multiple choice across 14 subjects (12,032 test items total):
   Stage 1  generate up to --think-budget reasoning tokens (stop early on </think>).

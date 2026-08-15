@@ -1,5 +1,16 @@
 """Budget-forced HumanEval for ZAYA1-8B W4A4 on 16 GB VRAM.
 
+Why not the standard tool: lm-eval-harness supports reasoning models via
+`think_end_token`, but it only strips post-hoc — `generation.split(tok)[-1]` —
+so a model that never emits `</think>` within budget has its whole
+unterminated trace scored as the answer (here: submitted as the code). ZAYA1
+frequently does not close its think block, so this implements actual budget
+*forcing* instead.
+
+No BF16 reference exists for this benchmark: Zyphra does not publish a
+HumanEval number for ZAYA1-8B, so these results stand alone rather than as a
+retention-vs-baseline comparison.
+
 Same protocol as scripts/eval_ifeval_budget_forced.py (full-response style,
 not a short forced answer - there's no short answer to force for code gen):
   Stage 1  generate up to --think-budget reasoning tokens (stop early on </think>).

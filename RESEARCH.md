@@ -1373,6 +1373,103 @@ caught it. This is the second time in two sessions that "exit code 0" meant
 nothing (§5.14 was the first) — judge these runs by measured behaviour, never
 by process status.
 
+### 5.21 Generative Eval Suite: Methodology, and Why the Standard Tool Doesn't Cover This Model (2026-08-15)
+
+Every accuracy number this project has published so far comes from
+**loglikelihood** tasks (hellaswag, arc_challenge, winogrande, piqa). Those
+score pre-written continuations — they measure *ranking*, never *producing*.
+That is a structural blind spot, and this project has already been burned by
+it: a checkpoint that could not form a coherent sentence scored 61.18% on
+HellaSwag. GSM8K, HumanEval and MMLU-Pro are added specifically to close it.
+
+#### The standard-tool check, and its outcome
+
+Per this project's "standard tools before bespoke" rule, lm-eval-harness was
+checked first — and it *does* now ship reasoning-model support
+(`think_end_token`, added July 2025, available in the installed build for the
+vLLM backend). Reading the implementation:
+
+```python
+generation = generation.split(think_end_token)[-1].lstrip()
+```
+
+It strips **post-hoc**. When the model closes `</think>`, this works. When it
+does not, `split()` returns a single element and `[-1]` hands back the entire
+unterminated reasoning trace *as the answer*, which is then scored — exactly
+the artifact that put IFEval at 19.8% against a BF16 reference of 85.58%.
+
+ZAYA1 frequently does not close its think block within a feasible budget, so
+the standard tool cannot measure it correctly. The bespoke scripts implement
+actual budget **forcing** (generate bounded reasoning, then *inject*
+`</think>` and decode the answer that gets scored) rather than post-hoc
+stripping. Every scorer inside them is still lm-eval's own — the gsm8k
+flexible-extract regex, the mmlu_pro answer regex, HF `evaluate`'s sandboxed
+`code_eval` for pass@1 — so only the generation protocol is custom, not the
+grading.
+
+#### Think-budget is a real parameter, not a default to accept
+
+Measured on GSM8K, n=20, identical items and seed:
+
+| think_budget | accuracy | self-closed `</think>` |
+|---:|---:|---:|
+| 2048 | 50.0% | 1/10 |
+| 4096 | **75.0%** | 4/20 |
+
+A 25-point swing from the budget alone. This is the third benchmark on which
+an insufficient budget has understated this model (GPQA was 45.8% → 62.5%
+across the same lever). **4096 is the default**; the scripts now also report
+how many items hit the ceiling, so an under-budgeted run is visible in its own
+output rather than silently depressing the score.
+
+#### Extraction failures were silently costing accuracy
+
+The first GSM8K smoke run scored one item wrong where the model had reasoned
+correctly — the forced short answer opened with a newline, hit the stop
+sequence, and yielded no number at all. That is a *formatting* miss being
+recorded as a *reasoning* miss, and at 1/20 it is not negligible. The scripts
+now fall back to the tail of the reasoning trace when the forced answer
+contains no parsable answer (the fallback GPQA and MMLU-Pro already had) and
+report how many items needed it, so the rate stays visible.
+
+#### Baselines: what can and cannot be compared
+
+| benchmark | Zyphra BF16 published | usable as baseline? |
+|---|---|---|
+| MMLU-Pro | 74.2 | indicative only — see below |
+| GSM8K | **not published** | no baseline exists |
+| HumanEval | **not published** | no baseline exists |
+
+Zyphra states only that "all numbers are run on the Zyphra evaluation
+harness" — private, with undisclosed generation limits and prompting. Their
+figures are therefore not reproducible by anyone, and comparing a
+budget-forced number against them is a *different experiment*, not a
+reproduction. GSM8K and HumanEval results stand alone. Running the BF16 model
+locally to generate a matched baseline is not possible either: at 17.7 GB of
+weights it does not fit in this card's 16 GB.
+
+Sampling follows Zyphra's published recommendation (temperature 0.6, top_p
+0.95 — their agent/code setting; they suggest 1.0 for general use), fixed
+seed 42, recorded in every result artifact.
+
+#### Tooling shipped
+
+- `scripts/run_budget_forced_suite.sh` — runs all three unattended, one
+  process per benchmark, cheapest-first so a partial run still leaves
+  results. A stage is skipped only if its artifact **parses as JSON**; never
+  a size threshold (a 200-byte floor once rejected a valid 188-byte result),
+  never an exit code (vLLM can abort at teardown *after* writing a valid
+  result). Records the environment fingerprint alongside the numbers.
+- `scripts/compare_budget_forced.py` — paired exact-binomial McNemar on
+  discordant items, since comparing two checkpoints on the same items is a
+  paired design and aggregate-only comparison wastes the run (the ARC-Easy
+  +1.81 pp / p=0.18 mistake). Refuses to compare runs with mismatched
+  think_budget, and prints the CI with an explicit warning against reporting
+  a non-significant point estimate. Verified against four fixtures: a real
+  difference (correctly significant), pure coin-flip noise (+4.50 pp,
+  correctly *not* significant), a budget mismatch (warns), and HumanEval's
+  schema (+16.67 pp at n=60, correctly *not* significant).
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)

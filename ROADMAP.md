@@ -599,6 +599,51 @@ from this finding.
 
 Full detail: `RESEARCH.md` §5.18 (update).
 
+#### Session 18 — Generative Eval Suite + Two Silent-Corruption Fixes (2026-08-15) 🟢🔴
+
+**EBSS closed permanently, and the bug it exposed fixed at the source.**
+Requantizing with EBSS calibration produced a checkpoint that exited 0 with
+no errors and byte-identical weights, yet scored at **chance level**
+(hellaswag acc_norm 60.29% → 25.75%). Root cause: `ebss_resample()` never
+masked already-picked samples, yielding a corpus of **3 unique rows out of
+977** (one repeated 972×), which under-observed activation maxima ~40% and
+inflated `input_global_scale` on 95.8% of modules. After fixing selection to
+sample without replacement, coverage came back **identical** (0.04 → 0.04) —
+selecting N from N is a permutation, and `activation_max` is a running max,
+an order/frequency-independent statistic. **EBSS cannot help max-based
+calibration by construction**, so it is retired rather than left as a
+maybe-retry. Both scripts hardened so this class of silent corruption cannot
+recur. Full detail: `RESEARCH.md` §5.20.
+
+**Generative eval suite built and hardened.** GSM8K, HumanEval and MMLU-Pro
+budget-forced harnesses now exist, closing the loglikelihood blind spot (those
+tasks score *ranking*, never *producing* — the reason a checkpoint incapable
+of forming a sentence once scored 61% on HellaSwag). Checked lm-eval's own
+reasoning support first per the standard-tools rule: its `think_end_token`
+strips post-hoc (`split(tok)[-1]`), so a model that never closes `</think>`
+has its whole trace scored as the answer — the artifact that put IFEval at
+19.8%. Budget *forcing* is therefore genuinely required here; all scoring
+still uses lm-eval's own regexes and HF `evaluate`'s `code_eval`. Also fixed
+a real defect: extraction failures (forced answer opening with a newline)
+were being recorded as reasoning failures, costing 1 of 20 items. Full
+detail: `RESEARCH.md` §5.21.
+
+**Baseline limits, stated up front:** Zyphra publishes no GSM8K or HumanEval
+figure, and its MMLU-Pro 74.2 comes from a private harness with undisclosed
+generation limits — so these results largely stand alone rather than as
+retention-vs-baseline. Generating a matched BF16 baseline locally is
+impossible: 17.7 GB of weights does not fit in 16 GB.
+
+**Not pursued, with reasons:** ARCQuant residual corrections for the 10
+uncorrected outlier layers are implemented on both sides but require a
+patched vLLM branch to serve — that would make the published checkpoint
+unusable with stock vLLM, a bad trade for a public artifact. EAQuant's
+routing-consistency idea (independent 2026 work validating expert-aware PTQ)
+is real but built on OmniQuant/DuQuant, so it needs reimplementation rather
+than reuse. EAGLE-3 needs a model-specific draft head trained from scratch.
+CUTLASS #3096's `compute_120f` rebuild remains the largest untried speed
+lever. None fit a single session.
+
 #### Engineering Cleanup — Session 15 Action Items ⬜
 
 The following items were identified as unprofessional shortcuts during session 15.

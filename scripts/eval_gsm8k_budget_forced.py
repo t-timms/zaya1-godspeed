@@ -1,13 +1,21 @@
 """Budget-forced GSM8K for ZAYA1-8B W4A4 on 16 GB VRAM.
 
-Same problem as GPQA/IFEval: ZAYA1-8B's <think> trace does not reliably close
-within a feasible token budget, so a stock zero-shot-CoT harness either times
-out mid-reasoning or scores the unterminated trace. This mirrors
-scripts/eval_gpqa_budget_forced.py:
+Why not the standard tool: lm-eval-harness *does* support reasoning models via
+`think_end_token`, but it only strips post-hoc — `generation.split(tok)[-1]` —
+so when the model never emits `</think>` within the budget it returns the whole
+unterminated trace as the "answer" and scores that (the same artifact that put
+IFEval at 19.8% vs a BF16 reference of 85.58%). ZAYA1 frequently does not close
+its think block, so this implements actual budget *forcing* instead:
   Stage 1  generate up to --think-budget reasoning tokens (stop early on </think>).
   Stage 2  inject "</think>\n\nThe answer is " and decode a short numeric answer.
   Score    reuse lm-eval's own gsm8k-cot-zeroshot extraction regexes so the
            number-parsing logic matches the standard harness exactly.
+
+Sampling defaults follow Zyphra's published recommendation for ZAYA1-8B
+(temperature 0.6, top_p 0.95 for agent/code tasks; they recommend 1.0 for
+general use). Note their published benchmark numbers come from a private
+"Zyphra evaluation harness" with undisclosed generation limits, so cross-
+comparison against them is indicative, not a reproduction.
 
 Run (WSL, vllm-env active):
     python3 scripts/eval_gsm8k_budget_forced.py --n 20         # smoke
@@ -105,10 +113,21 @@ def main() -> int:
     ans_outs = llm.generate(forced_prompts, sp_ans)
 
     correct = 0
+    extraction_failures = 0
     rows = []
     for d, t_out, a_out in zip(docs, think_outs, ans_outs):
         gold = gold_answer(d["answer"])
         pred = extract_number(a_out.outputs[0].text)
+        # Fall back to the tail of the reasoning trace when the forced short
+        # answer yields no number at all (the model opened with prose or a
+        # newline and hit the stop sequence). Without this, a formatting miss
+        # is scored as a wrong answer and silently understates accuracy — it
+        # cost 1 of 20 items on the first smoke run. Mirrors the same fallback
+        # already used in eval_gpqa_budget_forced.py / eval_mmlu_pro_*.py.
+        if pred is None:
+            pred = extract_number(t_out.outputs[0].text[-200:])
+            if pred is not None:
+                extraction_failures += 1
         ok = pred is not None and pred == gold
         correct += int(ok)
         rows.append((gold, pred, ok, len(t_out.outputs[0].token_ids)))
@@ -125,6 +144,9 @@ def main() -> int:
     acc = correct / len(docs)
     print(f"accuracy: {correct}/{len(docs)} = {acc * 100:.1f}%")
     print(f"self-closed </think> within budget: {closed}/{len(docs)}")
+    print(f"recovered by trace fallback (forced answer had no number): {extraction_failures}/{len(docs)}")
+    truncated = sum(1 for _, _, _, nt in rows if nt >= args.think_budget)
+    print(f"hit think-budget ceiling: {truncated}/{len(docs)}  (raise --think-budget if this is most of them)")
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,6 +163,8 @@ def main() -> int:
                 "correct": correct,
                 "accuracy": acc,
                 "self_closed_think": closed,
+                "recovered_by_trace_fallback": extraction_failures,
+                "hit_think_budget_ceiling": truncated,
                 "per_question": [{"gold": g, "pred": p, "correct": ok, "think_tokens": nt} for g, p, ok, nt in rows],
             },
             indent=2,

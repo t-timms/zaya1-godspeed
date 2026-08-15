@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Runs the three budget-forced generative benchmarks unattended.
+#
+# These complement the loglikelihood suite (hellaswag/arc/winogrande/piqa),
+# which scores pre-written continuations and therefore cannot detect whether
+# the model can actually *produce* correct maths or code - the blind spot that
+# let a checkpoint incapable of forming a sentence score 61% on HellaSwag.
+#
+# Design follows AGENTS.md's benchmarking protocol:
+#   - one process per benchmark, so one failure cannot take down the others
+#   - success judged by the artifact on disk parsing as JSON, never by exit
+#     code (vLLM can abort at teardown *after* writing a valid result) and
+#     never by file size (a 200-byte floor once rejected a valid 188-byte run)
+#   - re-runs resume: a stage with a valid artifact is skipped, not repeated
+#   - the complete log always goes to a file; only the console view is filtered
+#
+# Order is cheapest-first so a partial run still leaves usable results.
+#
+# Usage (WSL, from the repo root):
+#     bash scripts/run_budget_forced_suite.sh
+#     MODEL=./zaya1-8b-nvfp4-w4a4 bash scripts/run_budget_forced_suite.sh
+#     THINK_BUDGET=8192 bash scripts/run_budget_forced_suite.sh
+#     FORCE=1 bash scripts/run_budget_forced_suite.sh    # ignore existing artifacts
+set -uo pipefail
+
+MODEL="${MODEL:-./zaya1-8b-nvfp4-w4a4-arcbase}"
+THINK_BUDGET="${THINK_BUDGET:-4096}"
+MMLU_N="${MMLU_N:-700}"          # stratified subset; -1 for the full 12,032
+PY="${PY:-$HOME/vllm-env/bin/python3}"
+RESULTS_DIR="${RESULTS_DIR:-results/budget_forced}"
+LOG_DIR="${LOG_DIR:-$RESULTS_DIR/logs}"
+FORCE="${FORCE:-0}"
+
+mkdir -p "$RESULTS_DIR" "$LOG_DIR"
+
+TAG="$(basename "$MODEL")"
+START_TS="$(date +%Y%m%d-%H%M%S)"
+SUMMARY="$RESULTS_DIR/SUMMARY-${TAG}-${START_TS}.txt"
+
+echo "suite start   : $(date -Is)"        | tee "$SUMMARY"
+echo "model         : $MODEL"             | tee -a "$SUMMARY"
+echo "think budget  : $THINK_BUDGET"      | tee -a "$SUMMARY"
+echo "mmlu subset n : $MMLU_N"            | tee -a "$SUMMARY"
+echo "" | tee -a "$SUMMARY"
+
+# Environment fingerprint - a stack change with unchanged numbers still
+# invalidates prior claims, so record it alongside the results.
+{
+  echo "--- environment ---"
+  "$PY" -c "import vllm; print('vllm', vllm.__version__)" 2>/dev/null
+  "$PY" -c "import torch; print('torch', torch.__version__, torch.version.cuda)" 2>/dev/null
+  nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null
+  ( cd "$HOME/vllm-src" 2>/dev/null && echo "vllm-src commit $(git rev-parse --short HEAD)" )
+  echo ""
+} | tee -a "$SUMMARY"
+
+# A stage is "already done" only if its artifact exists AND parses as JSON.
+artifact_ok() {
+  local path="$1"
+  [ -f "$path" ] || return 1
+  "$PY" -c "import json,sys; json.load(open(sys.argv[1]))" "$path" >/dev/null 2>&1
+}
+
+run_stage() {
+  local name="$1" script="$2" artifact="$3"
+  shift 3
+
+  if [ "$FORCE" != "1" ] && artifact_ok "$artifact"; then
+    echo "[$name] SKIP - valid artifact already at $artifact" | tee -a "$SUMMARY"
+    return 0
+  fi
+
+  local log="$LOG_DIR/${name}-${TAG}-${START_TS}.log"
+  echo "[$name] start $(date -Is)  -> $log" | tee -a "$SUMMARY"
+
+  local t0 t1
+  t0=$(date +%s)
+  # Full output to the log file. Never pipe a fallible subprocess through a
+  # filter - the filtered line is always the one naming the cause.
+  "$PY" "$script" --model "$MODEL" --think-budget "$THINK_BUDGET" --output "$artifact" "$@" >"$log" 2>&1
+  local rc=$?
+  t1=$(date +%s)
+
+  if artifact_ok "$artifact"; then
+    echo "[$name] OK   $(( (t1 - t0) / 60 ))m  (exit $rc, artifact valid)" | tee -a "$SUMMARY"
+    "$PY" - "$artifact" <<'PYEOF' | tee -a "$SUMMARY"
+import json, sys
+d = json.load(open(sys.argv[1]))
+keys = ("accuracy", "pass_at_1", "n", "self_closed_think",
+        "hit_think_budget_ceiling", "recovered_by_trace_fallback")
+print("        " + "  ".join(f"{k}={d[k]}" for k in keys if k in d))
+PYEOF
+  else
+    echo "[$name] FAIL $(( (t1 - t0) / 60 ))m  (exit $rc, no valid artifact) - see $log" | tee -a "$SUMMARY"
+    tail -n 15 "$log" | sed 's/^/        | /' | tee -a "$SUMMARY"
+  fi
+  echo "" | tee -a "$SUMMARY"
+}
+
+# Cheapest first: a partial run still leaves the most results on disk.
+run_stage humaneval scripts/eval_humaneval_budget_forced.py \
+  "$RESULTS_DIR/humaneval-${TAG}.json"
+
+run_stage mmlu_pro scripts/eval_mmlu_pro_budget_forced.py \
+  "$RESULTS_DIR/mmlu_pro-${TAG}.json" --n "$MMLU_N"
+
+run_stage gsm8k scripts/eval_gsm8k_budget_forced.py \
+  "$RESULTS_DIR/gsm8k-${TAG}.json"
+
+echo "suite end     : $(date -Is)" | tee -a "$SUMMARY"
+echo "summary       : $SUMMARY"    | tee -a "$SUMMARY"

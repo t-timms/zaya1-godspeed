@@ -110,6 +110,10 @@ def main() -> int:
     ap.add_argument("--top-p", type=float, default=0.95, dest="top_p")
     ap.add_argument("--max-model-len", type=int, default=8192, dest="max_model_len")
     ap.add_argument("--output", default="results/mmlu_pro_budget_forced.json")
+    # See the note in eval_gsm8k_budget_forced.py: the Wilson interval covers
+    # item sampling, not generation stochasticity. Repeat runs at different
+    # seeds are the only way to measure the latter.
+    ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
     from transformers import AutoTokenizer
@@ -148,7 +152,7 @@ def main() -> int:
         top_p=args.top_p,
         max_tokens=args.think_budget,
         stop=["</think>", "</s>"],
-        seed=42,
+        seed=args.seed,
     )
     think_outs = llm.generate(base_prompts, sp_think)
     closed = sum(o.outputs[0].stop_reason == "</think>" for o in think_outs)
@@ -195,7 +199,7 @@ def main() -> int:
                 "max_model_len": args.max_model_len,
                 "temperature": args.temp,
                 "top_p": args.top_p,
-                "seed": 42,
+                "seed": args.seed,
                 "correct": correct,
                 "accuracy": acc,
                 "accuracy_ci95": [ci_lo, ci_hi],

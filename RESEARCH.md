@@ -1590,6 +1590,77 @@ recovered six items whose reasoning was correct but whose forced short answer
 opened with a newline and yielded no parsable number — six items that would
 otherwise have been scored as reasoning failures.
 
+### 5.23 The Reasoning/Latency Tradeoff, Quantified: Thinking Is Worth 17–29 Points (2026-08-16)
+
+**ZAYA1's chat template ships an `enable_thinking` flag from Zyphra that this
+project had never used.** Set to `False` it pre-closes the think block, so the
+model answers immediately:
+
+```jinja
+{%- if enable_thinking %}{{- '...assistant\n<think>\n' }}
+{%- else %}{{- '...assistant\n<think>\n</think>\n\n' }}{%- endif %}
+```
+
+A 3-prompt probe looked extremely promising — **3× faster, 5× fewer tokens, and
+better answers** (3/3 complete and correct, versus 1/3 with thinking on, where
+two requests hit the token cap mid-reasoning and produced no answer at all).
+That was n=3 on trivial prompts, so it was run properly across all three
+generative benchmarks.
+
+#### Result: the speedup is real and the accuracy cost is severe
+
+Paired exact-binomial McNemar on identical items, same checkpoint, same seed:
+
+| benchmark | thinking | no-thinking | Δ | 95% CI | p | wall time |
+|---|---:|---:|---:|---|---:|---|
+| **HumanEval** | 72.6% | 43.9% | **−28.66 pp** | [−35.46, −19.34] | <0.0001 | 15 m → **2 m** |
+| **MMLU-Pro** | 48.1% | 26.7% | **−21.43 pp** | [−24.93, −17.42] | <0.0001 | 39 m → **4 m** |
+| **GSM8K** | 65.5% | 48.1% | **−17.36 pp** | [−20.61, −13.93] | <0.0001 | 63 m → **8 m** |
+
+All three highly significant, no interval anywhere near zero. Full suite:
+**1h58m → 14m (~8.5× faster)** for a **17–29 point** accuracy loss.
+
+Discordant counts show this is not noise: on HumanEval, 59 problems were solved
+only with thinking versus 12 only without; on MMLU-Pro, 203 versus 53; on
+GSM8K, 402 versus 173. On MMLU-Pro the no-thinking score of 26.7% approaches
+chance-adjusted territory for 10-way multiple choice.
+
+#### What this establishes about the model
+
+**ZAYA1's accuracy *is* its reasoning, and its reasoning *is* what makes it
+slow. The two cannot be separated.** This is not a quantization artifact, not a
+budget-tuning problem, and not something a serving flag can fix — it is what
+the model is. It also independently corroborates §5.22: reasoning is doing real
+work, which is why starving the budget didn't help either.
+
+Practical consequence: **this checkpoint is not a fast interactive coding
+agent, and no amount of configuration makes it one.** That conclusion is now
+evidence-based rather than inferred.
+
+#### Where the lever is still useful
+
+A *global* switch is clearly wrong. **Per-request routing is not.** vLLM accepts
+`chat_template_kwargs: {"enable_thinking": false}` per request, so a classifier
+can send mechanical work (file reads, trivial edits, simple tool calls) down
+the fast path in seconds while genuine problem-solving keeps reasoning and pays
+the latency. The counts above even suggest headroom for it: 12/53/173 items
+were solved *only* without thinking, i.e. some tasks are actively hurt by
+overthinking.
+
+This matches the 2026 guidance that production agents want a routing layer
+rather than one model configuration.
+
+#### Harness note — `llm.chat()`, always
+
+The first attempt at this measurement used `apply_chat_template()` +
+`generate()` and produced fluent-but-completely-off-topic output in **both**
+conditions ("What is 84 * 3 / 2?" → text about string arrangements), which
+looked exactly like a broken checkpoint. The model was fine; the harness was
+not. The template emits `bos_token` itself, so that path risks a doubled BOS.
+Re-running through **`llm.chat()`** — which handles the template internally and
+accepts `chat_template_kwargs` — gave clean output immediately. This is the
+second time this specific trap has cost time on this project.
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)

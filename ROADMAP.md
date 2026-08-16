@@ -674,6 +674,36 @@ bounded this checkpoint's cost at −0.71 pp HellaSwag. **Reported as "0-shot,
 budget-forced" and explicitly not comparable.** Full analysis: `RESEARCH.md`
 §5.22.
 
+#### The reasoning/latency tradeoff, quantified (2026-08-16) 🔴
+
+ZAYA1's chat template ships an `enable_thinking` flag (Zyphra's own) that this
+project had never used. Off, it pre-closes `<think>` so the model answers
+immediately. A 3-prompt probe looked excellent — 3× faster, better answers — so
+it was measured properly on all three benchmarks. Paired McNemar, identical
+items:
+
+| benchmark | thinking | no-thinking | Δ | p | wall time |
+|---|---:|---:|---:|---:|---|
+| HumanEval | 72.6% | 43.9% | **−28.66 pp** | <0.0001 | 15 m → 2 m |
+| MMLU-Pro | 48.1% | 26.7% | **−21.43 pp** | <0.0001 | 39 m → 4 m |
+| GSM8K | 65.5% | 48.1% | **−17.36 pp** | <0.0001 | 63 m → 8 m |
+
+**~8.5× faster overall (1h58m → 14m) for a 17–29 point accuracy loss.** All
+three highly significant.
+
+**Conclusion: ZAYA1's accuracy *is* its reasoning, and its reasoning *is* what
+makes it slow — they cannot be separated.** This checkpoint is not a fast
+interactive coding agent and no configuration makes it one. That is now
+evidence-based rather than inferred, and it is a genuine finding rather than a
+limitation to hide.
+
+**Where the lever still applies:** per-request routing, not a global switch.
+vLLM takes `chat_template_kwargs: {"enable_thinking": false}` per request, so
+mechanical work can take the fast path while real problem-solving keeps
+reasoning. Notably 12/53/173 items were solved *only* without thinking — some
+tasks are actively hurt by overthinking, which a classifier could exploit.
+Full analysis: `RESEARCH.md` §5.23.
+
 #### Engineering Cleanup — Session 15 Action Items ⬜
 
 The following items were identified as unprofessional shortcuts during session 15.

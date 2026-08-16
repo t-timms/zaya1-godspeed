@@ -77,7 +77,7 @@ question is answered — but with gaps that keep our work distinct:
 | Hardware validated | RTX PRO 6000 (96 GB workstation Blackwell) | **RTX 5070 Ti, 16 GB consumer** |
 | Compute capability | SM120 (`gpu_capability [12, 0]`) | SM120 — **same arch; VRAM budget is the difference, not SM120 support** |
 | Accuracy eval | None — reposts model-card numbers | **Own lm-eval** (ARC, HellaSwag, GPQA/MMLU-Pro/IFEval) |
-| Throughput reported | None | **102 tok/s single / 407 tok/s batch-8** (CUDA graphs) |
+| Throughput reported | None | **9.5 tok/s single / ~74 tok/s batch-8** (`enforce_eager`, 5 invocations each). An earlier 102/407 figure was measured under CUDA graphs, a path since confirmed to corrupt output on SM120, and is retracted |
 | Outlier handling | Not addressed | Mixed-precision outlier-layer exemption + SOAR/MR-GPTQ |
 
 It's a useful **A/B baseline** to diff our checkpoint against, not a reason to stop.

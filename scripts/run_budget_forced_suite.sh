@@ -28,6 +28,13 @@ THINK_BUDGET="${THINK_BUDGET:-4096}"
 MMLU_N="${MMLU_N:-700}"          # stratified subset; -1 for the full 12,032
 PY="${PY:-$HOME/vllm-env/bin/python3}"
 FORCE="${FORCE:-0}"
+
+# The context must hold the prompt + the full reasoning budget + the answer.
+# Left at the scripts' 8192 default, a THINK_BUDGET of 8192 would be cut off by
+# the context limit rather than the budget — silently measuring the wrong thing
+# while every log line still looks correct. Derive it instead, with headroom.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-$(( THINK_BUDGET * 2 ))}"
+if [ "$MAX_MODEL_LEN" -lt 8192 ]; then MAX_MODEL_LEN=8192; fi
 # SMOKE_N caps every stage to N items and redirects output to a separate
 # directory. Use it to verify the orchestration end-to-end (~10 min) before
 # committing to a multi-hour run — the plumbing is what fails at 3am, not the
@@ -51,6 +58,7 @@ SUMMARY="$RESULTS_DIR/SUMMARY-${TAG}-${START_TS}.txt"
 echo "suite start   : $(date -Is)"        | tee "$SUMMARY"
 echo "model         : $MODEL"             | tee -a "$SUMMARY"
 echo "think budget  : $THINK_BUDGET"      | tee -a "$SUMMARY"
+echo "max model len : $MAX_MODEL_LEN"     | tee -a "$SUMMARY"
 echo "mmlu subset n : $MMLU_N"            | tee -a "$SUMMARY"
 if [ -n "$SMOKE_N" ]; then
   echo "MODE          : SMOKE (n=$SMOKE_N per stage) — results are NOT publishable" | tee -a "$SUMMARY"
@@ -91,7 +99,8 @@ run_stage() {
   t0=$(date +%s)
   # Full output to the log file. Never pipe a fallible subprocess through a
   # filter - the filtered line is always the one naming the cause.
-  "$PY" "$script" --model "$MODEL" --think-budget "$THINK_BUDGET" --output "$artifact" "$@" >"$log" 2>&1
+  "$PY" "$script" --model "$MODEL" --think-budget "$THINK_BUDGET" \
+    --max-model-len "$MAX_MODEL_LEN" --output "$artifact" "$@" >"$log" 2>&1
   local rc=$?
   t1=$(date +%s)
 

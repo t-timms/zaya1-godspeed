@@ -89,6 +89,9 @@ def main() -> int:
     # seeds are the only way to measure the latter — relevant here since pass@1
     # from a single sample is itself a high-variance estimator.
     ap.add_argument("--seed", type=int, default=42)
+    # Run with ZAYA1's built-in enable_thinking=False instead of budget forcing,
+    # to quantify what disabling reasoning costs on code generation.
+    ap.add_argument("--no-thinking", action="store_true", dest="no_thinking")
     args = ap.parse_args()
 
     import evaluate as hf_evaluate
@@ -132,25 +135,46 @@ def main() -> int:
         kv_cache_dtype="fp8",
     )
 
-    sp_think = SamplingParams(
-        temperature=args.temp,
-        top_p=args.top_p,
-        max_tokens=args.think_budget,
-        stop=["</think>", "</s>"],
-        seed=args.seed,
-    )
-    think_outs = llm.generate(base_prompts, sp_think)
-    closed = sum(o.outputs[0].stop_reason == "</think>" for o in think_outs)
+    if args.no_thinking:
+        # enable_thinking=False pre-closes <think>, so the model emits code
+        # directly. Via llm.chat() — apply_chat_template()+generate() has twice
+        # produced off-topic output on this model (doubled BOS). This is a
+        # protocol-vs-protocol comparison, not a single-variable ablation.
+        convs = [
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        "Write a solution to the following problem and make sure "
+                        f"that it passes the tests:\n```python\n{d['prompt']}\n```"
+                    ),
+                }
+            ]
+            for d in docs
+        ]
+        sp = SamplingParams(temperature=args.temp, top_p=args.top_p, max_tokens=args.response_max, seed=args.seed)
+        ans_outs = llm.chat(convs, sp, chat_template_kwargs={"enable_thinking": False})
+        closed = 0
+    else:
+        sp_think = SamplingParams(
+            temperature=args.temp,
+            top_p=args.top_p,
+            max_tokens=args.think_budget,
+            stop=["</think>", "</s>"],
+            seed=args.seed,
+        )
+        think_outs = llm.generate(base_prompts, sp_think)
+        closed = sum(o.outputs[0].stop_reason == "</think>" for o in think_outs)
 
-    forced_prompts = [base + out.outputs[0].text + "\n</think>\n\n" for base, out in zip(base_prompts, think_outs)]
-    sp_ans = SamplingParams(
-        temperature=args.temp,
-        top_p=args.top_p,
-        max_tokens=args.response_max,
-        stop=["</s>", "<|im_end|>"],
-        seed=args.seed,
-    )
-    ans_outs = llm.generate(forced_prompts, sp_ans)
+        forced_prompts = [base + out.outputs[0].text + "\n</think>\n\n" for base, out in zip(base_prompts, think_outs)]
+        sp_ans = SamplingParams(
+            temperature=args.temp,
+            top_p=args.top_p,
+            max_tokens=args.response_max,
+            stop=["</s>", "<|im_end|>"],
+            seed=args.seed,
+        )
+        ans_outs = llm.generate(forced_prompts, sp_ans)
 
     references = [d["test"] + f"\ncheck({d['entry_point']})" for d in docs]
     predictions = [[extract_code(a_out.outputs[0].text.strip(), d["prompt"])] for d, a_out in zip(docs, ans_outs)]
@@ -161,7 +185,10 @@ def main() -> int:
     per_task = [{"task_id": d["task_id"], "passed": bool(detail[i][0][1]["passed"])} for i, d in enumerate(docs)]
 
     print("\n" + "=" * 72)
-    print(f"BUDGET-FORCED HumanEval  (n={len(docs)}, think_budget={args.think_budget})")
+    mode = (
+        "NO-THINKING (enable_thinking=False)" if args.no_thinking else f"BUDGET-FORCED think_budget={args.think_budget}"
+    )
+    print(f"HumanEval  (n={len(docs)}, {mode})")
     print("=" * 72)
     ci_lo, ci_hi = wilson_ci(correct, len(docs))
     print(
@@ -177,7 +204,8 @@ def main() -> int:
             {
                 "model": args.model,
                 "n": len(docs),
-                "think_budget": args.think_budget,
+                "think_budget": None if args.no_thinking else args.think_budget,
+                "no_thinking": args.no_thinking,
                 "max_model_len": args.max_model_len,
                 "temperature": args.temp,
                 "top_p": args.top_p,

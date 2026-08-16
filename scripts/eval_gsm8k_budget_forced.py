@@ -87,6 +87,11 @@ def main() -> int:
     # repeat runs at different seeds (this repo's own rule: n=1 is not a
     # result), which is why the knob exists even though the default is fixed.
     ap.add_argument("--seed", type=int, default=42)
+    # ZAYA1's chat template ships an enable_thinking flag (Zyphra's own). Off,
+    # it pre-closes <think> so the model answers directly — measured 3x faster
+    # with 5x fewer tokens. This runs that configuration instead of budget
+    # forcing, to quantify what disabling reasoning costs in accuracy.
+    ap.add_argument("--no-thinking", action="store_true", dest="no_thinking")
     args = ap.parse_args()
 
     from datasets import load_dataset
@@ -119,21 +124,35 @@ def main() -> int:
         kv_cache_dtype="fp8",
     )
 
-    sp_think = SamplingParams(
-        temperature=args.temp,
-        top_p=args.top_p,
-        max_tokens=args.think_budget,
-        stop=["</think>", "</s>"],
-        seed=args.seed,
-    )
-    think_outs = llm.generate(base_prompts, sp_think)
-    closed = sum(o.outputs[0].stop_reason == "</think>" for o in think_outs)
+    if args.no_thinking:
+        # ZAYA1's chat template pre-closes <think> when enable_thinking=False,
+        # so the model answers immediately and no budget forcing is needed.
+        # Routed through llm.chat() rather than apply_chat_template()+generate():
+        # that path has twice produced fluent-but-off-topic output on this model
+        # (doubled BOS — the template emits bos_token itself).
+        # NOTE this makes the comparison protocol-vs-protocol (two-stage forced
+        # vs single-stage direct), not a single-variable ablation. Label it so.
+        convs = [[{"role": "user", "content": d["question"]}] for d in docs]
+        sp = SamplingParams(temperature=args.temp, top_p=args.top_p, max_tokens=1024, seed=args.seed)
+        ans_outs = llm.chat(convs, sp, chat_template_kwargs={"enable_thinking": False})
+        think_outs = ans_outs  # no separate trace; keeps downstream zip() uniform
+        closed = 0
+    else:
+        sp_think = SamplingParams(
+            temperature=args.temp,
+            top_p=args.top_p,
+            max_tokens=args.think_budget,
+            stop=["</think>", "</s>"],
+            seed=args.seed,
+        )
+        think_outs = llm.generate(base_prompts, sp_think)
+        closed = sum(o.outputs[0].stop_reason == "</think>" for o in think_outs)
 
-    forced_prompts = [
-        base + out.outputs[0].text + "\n</think>\n\nThe answer is " for base, out in zip(base_prompts, think_outs)
-    ]
-    sp_ans = SamplingParams(temperature=0.0, max_tokens=32, stop=["\n", "</s>"], seed=42)
-    ans_outs = llm.generate(forced_prompts, sp_ans)
+        forced_prompts = [
+            base + out.outputs[0].text + "\n</think>\n\nThe answer is " for base, out in zip(base_prompts, think_outs)
+        ]
+        sp_ans = SamplingParams(temperature=0.0, max_tokens=32, stop=["\n", "</s>"], seed=42)
+        ans_outs = llm.generate(forced_prompts, sp_ans)
 
     correct = 0
     extraction_failures = 0
@@ -156,7 +175,10 @@ def main() -> int:
         rows.append((gold, pred, ok, len(t_out.outputs[0].token_ids)))
 
     print("\n" + "=" * 72)
-    print(f"BUDGET-FORCED GSM8K  (n={len(docs)}, think_budget={args.think_budget})")
+    mode = (
+        "NO-THINKING (enable_thinking=False)" if args.no_thinking else f"BUDGET-FORCED think_budget={args.think_budget}"
+    )
+    print(f"GSM8K  (n={len(docs)}, {mode})")
     print("=" * 72)
     print(f"{'gold':>10} {'pred':>10} {'ok':>3} {'think_toks':>10}")
     for gold, pred, ok, ntok in rows[:20]:
@@ -179,7 +201,8 @@ def main() -> int:
             {
                 "model": args.model,
                 "n": len(docs),
-                "think_budget": args.think_budget,
+                "think_budget": None if args.no_thinking else args.think_budget,
+                "no_thinking": args.no_thinking,
                 "max_model_len": args.max_model_len,
                 "temperature": args.temp,
                 "top_p": args.top_p,

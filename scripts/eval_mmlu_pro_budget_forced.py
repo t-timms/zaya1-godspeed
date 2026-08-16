@@ -114,6 +114,9 @@ def main() -> int:
     # item sampling, not generation stochasticity. Repeat runs at different
     # seeds are the only way to measure the latter.
     ap.add_argument("--seed", type=int, default=42)
+    # Run with ZAYA1's built-in enable_thinking=False instead of budget forcing,
+    # to quantify what disabling reasoning costs in accuracy.
+    ap.add_argument("--no-thinking", action="store_true", dest="no_thinking")
     args = ap.parse_args()
 
     from transformers import AutoTokenizer
@@ -147,21 +150,39 @@ def main() -> int:
         kv_cache_dtype="fp8",
     )
 
-    sp_think = SamplingParams(
-        temperature=args.temp,
-        top_p=args.top_p,
-        max_tokens=args.think_budget,
-        stop=["</think>", "</s>"],
-        seed=args.seed,
-    )
-    think_outs = llm.generate(base_prompts, sp_think)
-    closed = sum(o.outputs[0].stop_reason == "</think>" for o in think_outs)
+    if args.no_thinking:
+        # enable_thinking=False pre-closes <think> so the model answers
+        # directly; no budget forcing needed. Via llm.chat() because
+        # apply_chat_template()+generate() has twice produced off-topic output
+        # on this model (doubled BOS). Protocol-vs-protocol comparison, not a
+        # single-variable ablation — label results accordingly.
+        convs = []
+        for d in docs:
+            lines = [f"Question:\n{d['question']}\nOptions:"]
+            for i, opt in enumerate(d["options"]):
+                lines.append(f"{CHOICES[i]}. {opt.strip()}")
+            lines.append('Answer with the letter of the correct option, in the form "The answer is (X)".')
+            convs.append([{"role": "user", "content": "\n".join(lines)}])
+        sp = SamplingParams(temperature=args.temp, top_p=args.top_p, max_tokens=512, seed=args.seed)
+        ans_outs = llm.chat(convs, sp, chat_template_kwargs={"enable_thinking": False})
+        think_outs = ans_outs
+        closed = 0
+    else:
+        sp_think = SamplingParams(
+            temperature=args.temp,
+            top_p=args.top_p,
+            max_tokens=args.think_budget,
+            stop=["</think>", "</s>"],
+            seed=args.seed,
+        )
+        think_outs = llm.generate(base_prompts, sp_think)
+        closed = sum(o.outputs[0].stop_reason == "</think>" for o in think_outs)
 
-    forced_prompts = [
-        base + out.outputs[0].text + "\n</think>\n\nThe answer is (" for base, out in zip(base_prompts, think_outs)
-    ]
-    sp_ans = SamplingParams(temperature=0.0, max_tokens=8, stop=[")", "\n"], seed=42)
-    ans_outs = llm.generate(forced_prompts, sp_ans)
+        forced_prompts = [
+            base + out.outputs[0].text + "\n</think>\n\nThe answer is (" for base, out in zip(base_prompts, think_outs)
+        ]
+        sp_ans = SamplingParams(temperature=0.0, max_tokens=8, stop=[")", "\n"], seed=42)
+        ans_outs = llm.generate(forced_prompts, sp_ans)
 
     correct = 0
     by_subject_correct: dict[str, list[int]] = {}
@@ -174,7 +195,10 @@ def main() -> int:
         rows.append((d["category"], d["answer"], pred, ok, len(t_out.outputs[0].token_ids)))
 
     print("\n" + "=" * 72)
-    print(f"BUDGET-FORCED MMLU-Pro  (n={len(docs)}, think_budget={args.think_budget})")
+    mode = (
+        "NO-THINKING (enable_thinking=False)" if args.no_thinking else f"BUDGET-FORCED think_budget={args.think_budget}"
+    )
+    print(f"MMLU-Pro  (n={len(docs)}, {mode})")
     print("=" * 72)
     print(f"{'subject':<20} {'n':>5} {'acc':>7}")
     for subj in sorted(by_subject_correct):
@@ -195,7 +219,8 @@ def main() -> int:
                 "model": args.model,
                 "n": len(docs),
                 "full_set": args.n is not None and args.n < 0,
-                "think_budget": args.think_budget,
+                "think_budget": None if args.no_thinking else args.think_budget,
+                "no_thinking": args.no_thinking,
                 "max_model_len": args.max_model_len,
                 "temperature": args.temp,
                 "top_p": args.top_p,

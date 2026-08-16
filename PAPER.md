@@ -1,390 +1,549 @@
-# Consumer Blackwell Deployment of ZAYA1-8B: W4A4 NVFP4 Quantization with Mixed-Precision MoE and SM120 CUTLASS Inference
+# Consumer Blackwell Deployment of ZAYA1-8B: W4A4 NVFP4 Quantization, Three Silent-Corruption Failures, and What the Model Is Actually For
 
-**Tremayne Timms** — ttimmsinternational@gmail.com  
-*Independent Research, May 2026*
+**Tremayne Timms**, ttimmsinternational@gmail.com
+*Independent research. First draft May 2026. Substantially corrected August 2026.*
+
+---
+
+> ## ⚠️ Corrigendum, 2026-08-16
+>
+> **The first version of this paper (May 2026) reported 102.6 tok/s single-stream
+> and 407.4 tok/s at batch-8, and recommended CUDA graph capture as the serving
+> configuration. Both claims were wrong, and the second is dangerous.**
+>
+> CUDA graph capture produces numerically incorrect output for this model on
+> SM120. The failure is silent: the model emits fluent, confident text that is
+> unrelated to the prompt. Every throughput and accuracy number in the original
+> paper was measured on that path and is therefore void.
+>
+> | Original claim | Corrected |
+> |---|---|
+> | 102.6 tok/s single-stream | **9.5 tok/s** (`enforce_eager=True`) |
+> | 407.4 tok/s batch-8 | **~74 tok/s** |
+> | "12.8x speedup from CUDA graphs" | Withdrawn. Eager is the only correct mode |
+> | Checkpoint 8.9 GiB | **9.46 GB** mixed, **6.02 GB** uniform |
+> | ARC-Easy 68.6%, HellaSwag 61.5% | Void, re-measured in §6 |
+>
+> Anyone who deployed using the original paper's configuration was getting
+> corrupted output. That is the reason this correction is prominent rather than
+> a footnote.
+>
+> The correction is also the most interesting result in this work. Three
+> independent failures in this project all shared the same signature: a clean
+> exit code, plausible-looking output, and completely invalid results (§7.6).
 
 ---
 
 ## Abstract
 
-ZAYA1-8B (Zyphra, May 2026) delivers state-of-the-art reasoning benchmarks—including 89.1% on AIME 2026—using only 760M active parameters via mixture-of-experts routing, but its 17 GB BF16 footprint prevents deployment on consumer GPUs. We present the first W4A4 NVFP4 quantization of ZAYA1-8B targeting the NVIDIA RTX 5070 Ti (Blackwell SM120). Our pipeline introduces (1) layer-wise GPU calibration that keeps CCA attention in BF16 while quantizing MoE Linears, (2) dynamic mixed-precision exemption of the 12 MoE layers (scattered from layer 1 to 79) with per-expert activation outliers (max\_abs > 500), and (3) a clean checkpoint design that requires only a single one-line vLLM patch for reproducible loading. Served via vLLM with pre-compiled CUTLASS SM120 NVFP4 kernels and CUDA graph capture, we achieve **102.6 tok/s** (single-stream) and **407.4 tok/s** (batch-8)—a 12.8× speedup over eager mode—at a checkpoint size of 8.9 GiB (vs. 17 GiB BF16). On standard lm-eval tasks, the mixed-precision checkpoint reaches 68.6% ARC-Easy acc\_norm and 61.5% HellaSwag acc\_norm—improvements of +1.3% and +1.0% over the prior W4A4 baseline with no mixed precision.
+ZAYA1-8B (Zyphra, 2026) reaches strong reasoning benchmarks with 760M active
+parameters via top-1 mixture-of-experts routing, but its 17.7 GB BF16 footprint
+excludes consumer GPUs. We present a W4A4 NVFP4 quantization of ZAYA1-8B for the
+RTX 5070 Ti (Blackwell SM120), quantizing 4-bit weights *and* 4-bit activations,
+and publish two checkpoints: a 9.46 GB mixed-precision build and a 6.02 GB fully
+uniform build with no BF16 exemptions. A paired McNemar test over 14,319 items
+bounds the accuracy difference between them at -0.71 pp HellaSwag.
+
+Measured throughput is 9.5 tok/s single-stream and roughly 74 tok/s at batch-8,
+the latter at 96 to 98 percent of ideal scaling. Single-stream is slower than
+weight-only 4-bit quantizations of the same model, which is expected: decode at
+batch-1 is memory-bandwidth-bound, so quantizing activations adds work without
+relieving the bottleneck. W4A4's advantage is memory footprint and batched
+throughput, not latency.
+
+On generative benchmarks the 6.02 GB checkpoint scores 72.6% pass@1 on HumanEval
+(95% CI [65.3, 78.8]), 65.5% on GSM8K, and 48.1% on MMLU-Pro at 0-shot. The
+HumanEval figure appears to be the first published for ZAYA1-8B at any precision,
+and it matches or exceeds published full-precision results for Qwen 3 7B and
+Llama 3 8B.
+
+We also quantify the reasoning and latency tradeoff directly. Disabling the
+model's reasoning trace via its own chat template flag gives roughly an 8.5x
+speedup but costs 17 to 29 accuracy points across three benchmarks, all at
+p<0.0001. ZAYA1's accuracy is inseparable from its reasoning, and its reasoning
+is what makes it slow, so it is not a viable interactive coding assistant in any
+quantization format. Its real fit is batch and asynchronous workloads.
+
+Finally, we document three silent-corruption failures encountered during this
+work, each of which completed with exit code 0 and produced artifacts that
+passed every structural check while being entirely invalid.
 
 ---
 
 ## 1. Introduction
 
-Sparse mixture-of-experts (MoE) architectures achieve a favorable compute-to-quality ratio by activating only a fraction of parameters per token. ZAYA1-8B embodies this principle at an extreme: 16 experts with top-1 routing yields 760M active parameters from an 8B total parameter budget. The resulting BF16 model achieves AIME 2026 scores comparable to models with 3–12B active parameters (Table 2), yet fits its reasoning quality into the compute envelope of a sub-1B dense model.
+Sparse MoE architectures achieve a favourable compute-to-quality ratio by
+activating a fraction of parameters per token. ZAYA1-8B takes this to an extreme:
+16 experts with top-1 routing yields 760M active parameters from an 8.4B budget.
 
-The gap between quality and deployability, however, remains significant. At 17 GB, ZAYA1-8B in BF16 exceeds the memory capacity of all consumer GPUs. NVFP4—NVIDIA's block-structured 4-bit floating point format, hardware-accelerated on Blackwell tensor cores—offers a direct remedy: 4-bit weights and 4-bit activations (W4A4) reduce the model to roughly 9 GB while preserving the same weight values through a calibrated quantization scheme.
+The gap between quality and deployability remains. At 17.7 GB in BF16, ZAYA1-8B
+exceeds every consumer GPU. NVFP4, NVIDIA's block-structured 4-bit float format
+with Blackwell tensor core support, offers a direct remedy.
 
-This work makes the following contributions:
+Contributions:
 
-1. **First W4A4 NVFP4 checkpoint of ZAYA1-8B**, produced via layer-wise GPU calibration with ARC-aware calibration data (977 samples × 1024 tokens, including ARC-Easy, ARC-Challenge, and HellaSwag distributions).
+1. **A W4A4 NVFP4 checkpoint of ZAYA1-8B**, quantizing activations as well as
+   weights, produced by layer-wise GPU calibration. Two variants are published,
+   including a fully uniform 6.02 GB build with zero BF16 exemptions.
 
-2. **Dynamic mixed-precision MoE**: 12 MoE layers (scattered from layer 1 to 79, with 9 of 12 in the deepest third) exhibit per-expert activation outliers with max\_abs > 500—over 5× the nominal FP4 range of 448. Forcing these layers to W4A4 would require input\_global\_scale values of ~6, compressing 99%+ of activations near zero. We exempt entire MoE layers (FusedMoE requires uniform quantization across all experts) and keep them in BF16, preserving 936/948 candidate modules in W4A4.
+2. **Honest measurement of what W4A4 buys and costs.** Single-stream decode is
+   slower than weight-only quantization, and we explain why rather than hiding
+   it. Batched throughput and footprint are where the scheme pays.
 
-3. **SM120 CUTLASS kernel integration**: we compile vLLM 0.20.2 from source with `TORCH_CUDA_ARCH_LIST=12.0`, enabling `cutlass_scaled_fp4_mm_sm120a` and `cutlass_fp4_group_mm` kernels that exploit Blackwell's native NVFP4 tensor core MMA instructions. No custom CUDA code was written—the SM120 kernels existed in the vLLM source tree but were absent from pre-built wheels.
+3. **The first generative benchmark results for this model**, with confidence
+   intervals, including what appears to be the first HumanEval figure for
+   ZAYA1-8B at any precision.
 
-4. **Minimal reproducibility surface**: a single one-line addition to `vllm/model_executor/layers/fused_moe/oracle/unquantized.py` enables mixed-precision MoE loading. The checkpoint itself carries no quant-specific tensors on BF16-exempt layers, making the format unambiguous.
+4. **A quantified reasoning and latency tradeoff.** Disabling reasoning is 8.5x
+   faster and costs 17 to 29 accuracy points. This settles what the model is
+   suitable for.
+
+5. **Three silent-corruption failures, documented in full** (§7.4 to §7.6),
+   including the one that invalidated this paper's original results.
 
 ---
 
 ## 2. Background
 
-### 2.1 ZAYA1-8B Architecture
+### 2.1 ZAYA1-8B architecture
 
-ZAYA1-8B is a 80-layer MoE model with alternating Compressed Convolutional Attention (CCA) and MoE blocks. Key parameters:
+An 80-layer MoE model (in the pre-refactor config) with alternating Compressed
+Convolutional Attention (CCA) and MoE blocks.
 
 | Property | Value |
-|----------|-------|
+|---|---|
 | Total parameters | 8.4B |
-| Active parameters per token | 760M |
-| MoE experts | 16 (top-1 routing) |
-| Hidden dimension | 2,048 |
-| FFN dimension per expert | 4,096 |
-| Attention | CCA (depthwise + grouped conv1d, L2-normalized QK) |
-| Context window | 131,072 tokens |
-| License | Apache 2.0 |
+| Active parameters | 760M |
+| Experts | 16, top-1 routing |
+| Hidden size | 2048 |
+| Attention heads | 8, 2 KV heads |
+| Vocabulary | 262,272 |
+| Max positions | 131,072 |
 
-CCA attention differs substantially from standard multi-head attention: it uses depthwise and grouped 1D convolutions to mix queries and keys across sequence positions, with L2-normalized QK products and per-head learned temperature parameters. These layers are kept in BF16 throughout our quantization pipeline, as their convolution-based operations are not amenable to the NVFP4 block-structured format.
+**Base model revision.** Quantization used `Zyphra/ZAYA1-8B-legacy`, the
+pre-refactor 80-layer config. Zyphra later reshaped the checkpoint for an
+upstream transformers PR and published it as `Zyphra/ZAYA1-8B` with
+`num_hidden_layers: 40` and `layer_types: hybrid`.
 
-### 2.2 NVFP4 Format
+We verified these are the same weights rather than a retrain. Fetching
+`model.embed_tokens.weight` from both repositories via HTTP range request gives
+byte-identical tensors (1,074,266,112 bytes, BF16, shape [262272, 2048]), and
+both repositories report an identical aggregate `total_size` of 17,680,978,928
+bytes despite the tensor layout changing from 2,483 named tensors to 1,283. Every
+differing config field resolves to a clean unit conversion, for example
+`num_hidden_layers` 80 to 40 and `ffn_hidden_size` 4096 to 2048 are both exactly
+2:1.
 
-NVFP4 uses a two-level quantization hierarchy. At the fine level, each group of 16 consecutive elements shares a per-group FP8 scale (weight\_scale\_fp8, E4M3 format). At the coarse level, a scalar input\_global\_scale (fp32) converts per-token maximum activations to the FP4 grid. The final dequantization is:
+### 2.2 NVFP4
 
-```
-W_fp = unpack_fp4(W_packed) * weight_scale_fp8 * weight_global_scale
-A_fp = quantize_fp4(A) * input_global_scale
-```
-
-The Blackwell SM120 tensor core MMA instruction `m16n16k32` consumes W4A4 operands natively, performing accumulation in BF16. The `cutlass_scaled_fp4_mm_sm120a` kernel wraps this instruction with CUTLASS's pipelined memory hierarchy for high-throughput GEMM.
-
-The global\_scale convention (critical for correctness): the checkpoint stores `input_global_scale = 2688 / max_abs_activation`. The CT loader passes this divisor directly to the kernel as `input_global_scale_inv`, computing `block_scale = igs * vec_max / 6.0 = 448 * vec_max / max_abs`, where 448 is the FP4 maximum and 6.0 is the FP8 maximum. An inverted convention silently saturates all activations to 448, producing degenerate logits.
-
----
-
-## 3. Model Positioning
-
-ZAYA1-8B's public benchmarks (Table 1) show that a 760M active-parameter model matches or exceeds the performance of openly-available 4B dense models across math, coding, and knowledge tasks.
-
-**Table 1: In-class comparison — ZAYA1-8B vs. comparable-budget open-source reasoning models.**
-
-| Category | Benchmark | **ZAYA1-8B** (0.7B / 8.0B) | Qwen3-4B-Think-2507 (4.0B / 4.0B) | Qwen3.5-4B (4.0B / 4.0B) | Gemma-4-E4B-it (4.0B / 8.0B) |
-|----------|-----------|:------:|:------:|:------:|:------:|
-| Math | AIME '26 | **89.1** | 77.5 | 84.5 | 50.3 |
-| Math | HMMT Feb '26 | **71.6** | 60.8 | 63.6 | 32.1 |
-| Math | IMO-AnswerBench | **59.3** | 50.9 | 48.7 | 27.3 |
-| Math | APEX-shortlist | **32.2** | 16.9 | — | 6.1 |
-| Code | LiveCodeBench-v6 | **65.8** | 54.2 | — | 54.2 |
-| Knowledge | GPQA-Diamond | 71.0 | 66.5 | **76.2** | 57.4 |
-| Knowledge | MMLU-Pro | 74.2 | 74.3 | **79.1** | 70.2 |
-| Instruction | IFEval | 85.6 | 86.8 | **89.8** | 88.5 |
-| Instruction | IFBench | 52.6 | 52.9 | **59.2** | 42.7 |
-| Style & chat | EQBench | 73.0 | **79.6** | 79.5 | 80.2 |
-| Style & chat | Creative Writing v3 | 63.0 | 58.6 | 72.9 | **83.8** |
-| Agentic | BFCL-v4 | 39.2 | **49.7** | 45.2 | 31.7 |
-| Agentic | τ² | 43.1 | 52.9 | **82.1** | 37.7 |
-
-*All figures are from the Zyphra official model card (May 2026). ZAYA1-8B leads its compute class on math and coding tasks—the domains most relevant to reasoning-intensive workloads—using 5–6× fewer active parameters than its competitors.*
-
-**Table 2: Scaling comparison — ZAYA1-8B vs. larger open-source reasoning models.**
-
-| Model | Active | Total | AIME '26 | HMMT '26 | LCB-v6 | IFEval | GPQA-D | MMLU-Pro |
-|-------|:------:|:-----:|:--------:|:--------:|:------:|:------:|:------:|:--------:|
-| **ZAYA1-8B** | **0.7B** | **8B** | **89.1** | **71.6** | **63.8** | **85.8** | **71.0** | **74.2** |
-| Arcee-Trinity-Mini | 3B | 26B | 59.6 | 36.9 | 33.3 | 62.0 | 46.8 | 70.6 |
-| N3-Nano-30B | 3B | 30B | 90.1 | 75.5 | 64.6 | **92.8** | 75.1 | 78.9 |
-| OLMo-3.1-32B-Think | 32B | 32B | 78.9 | 50.6 | 58.3 | 93.2 | 59.6 | 75.8 |
-| Qwen3-Next-80B-A3B-Think | 3B | 80B | 90.2 | **79.3** | **67.8** | 88.5 | **76.7** | 82.6 |
-| Intellect-3 | 12B | 106B | 86.3 | 72.2 | 66.8 | 81.2 | 74.6 | 82.3 |
-| Mistral-Small-4-119B | 6B | 119B | 86.4 | 70.6 | 57.9 | 84.0 | 77.2 | 81.6 |
-
-*ZAYA1-8B with 0.7B active parameters achieves AIME scores competitive with models serving 3–32B active parameters. N3-Nano-30B and Qwen3-Next-80B (both MoE) are the only models that clearly exceed ZAYA1-8B on reasoning tasks, while requiring 4–130× more total compute per token.*
-
-The data motivates our deployment goal: make this exceptional reasoning-to-compute ratio accessible to consumer hardware owners via aggressive quantization without sacrificing the benchmark scores that justify it.
+NVFP4 is a block-structured 4-bit float with per-block FP8 scales and a per-tensor
+global scale. The convention that matters in practice: `global_scale` must be
+`2688 / max_abs` in divisor form, and `weight_scale_fp8` must be pre-multiplied by
+it. Getting this backwards produces silent NaN or zero logits rather than an
+error (§7.1).
 
 ---
 
-## 4. Quantization Pipeline
+## 3. Quantization pipeline
 
-### 4.1 Source Model
+### 3.1 Layer-wise GPU calibration
 
-We start from `Zyphra/ZAYA1-8B` (Apache 2.0, 17 GiB, 4-shard safetensors), loaded in BF16 under `transformers` with `trust_remote_code=True`.
+977 calibration samples of 1024 tokens each, drawn from an ARC-weighted mixture.
+Calibration runs layer by layer to fit in 16 GB, with forward hooks recording
+per-module activation maxima.
 
-### 4.2 Layer-Wise GPU Calibration
+`activation_max` is accumulated as a running maximum over every calibration
+token, which makes it order-independent and frequency-independent. This detail
+matters later (§7.5).
 
-Standard llm-compressor calibration runs the full model forward on CPU, which fails for ZAYA1-8B because CCA attention calls CUDA-only convolution kernels. We implement layer-wise GPU calibration:
+### 3.2 SOAR global-scale optimization
 
-1. Embed the 977-sample × 1024-token calibration corpus (BF16 token IDs) on GPU.
-2. For each of the 80 layers (in order): load the layer to GPU, run a forward pass with pre-saved hidden states from the previous layer, record per-Linear activation maxima via forward hooks, save output hidden states to CPU, unload the layer.
-3. Each layer occupies ~200 MB GPU memory during its calibration window; peak GPU usage stays below 4 GB.
+Max-abs scaling maximises FP4 range coverage but does not minimise reconstruction
+error. The dominant error source is FP8 block-scale rounding. A 25-point
+log-spaced grid search over candidate global scales, minimising weighted rounding
+error, improved HellaSwag acc_norm by roughly 0.9 pp. Max-abs remains a candidate
+in the search space, so the method can only match or improve on it.
 
-The calibration corpus (`data/calibration/arcmix/calibration_data.pt`) is a weighted mix of 977 samples × 1024 tokens:
+### 3.3 Mixed-precision exemption, and removing it
 
-| Source | Samples | Weight | Category |
-|--------|---------|--------|----------|
-| ARC-Easy | 153 | 15% | Standard eval task |
-| HellaSwag | 153 | 15% | Standard eval task |
-| ARC-Challenge | 98 | 10% | Standard eval task |
-| math500 | 102 | 10% | Math reasoning |
-| gsm8k | 102 | 10% | Math reasoning |
-| triviaqa | 102 | 10% | Knowledge |
-| alpaca | 102 | 10% | Instruction following |
-| humaneval | 38 | 5% | Code generation |
-| writingprompts | 51 | 5% | Style/creativity |
-| glaive | 51 | 5% | Agentic tool-use |
-| mbpp | 25 | 5% | Code completion |
-| **Total** | **977** | **100%** | |
+Twelve MoE layers carry per-expert activation outliers above 500, the worst being
+8,896, roughly 622x the median. FusedMoE requires uniform quantization across all
+experts in a layer, so protecting 24 offending modules forces 384 Linears to BF16
+and costs about 3.5 GB.
 
-Including ARC-Easy (15%), ARC-Challenge (10%), and HellaSwag (15%) in the calibration mix ensures the input\_global\_scale values are calibrated against a distribution representative of our lm-eval evaluation tasks, rather than being extrapolated from out-of-distribution math and code prompts alone.
+We therefore publish both variants. The uniform 6.02 GB build compresses those
+layers to W4A4 anyway. A paired exact-binomial McNemar test over 14,319 items
+across four loglikelihood tasks bounds the cost of doing so at **-0.71 pp
+HellaSwag, 95% CI [-1.26, -0.15]**.
 
-### 4.3 Dynamic Mixed-Precision Exemption
-
-After calibration, we compute the maximum activation magnitude across all experts for each MoE layer. Layers where `max(max_abs_per_expert) > 500` are added to the quantization ignore list, and their entire MLP (linear\_fc1 + linear\_fc2 for all 16 experts) is kept in BF16.
-
-**Threshold rationale**: The FP4 E2M1 format has a maximum representable value of 6.0 (in normalized form). With group-size-16 FP8 block scales, the effective dynamic range is 448 × 6 = 2688. An activation max\_abs of 500 requires input\_global\_scale = 2688/500 ≈ 5.4, meaning the FP8 per-group scales absorb 5.4× of the activation range before the FP4 grid starts. Values smaller than max\_abs/448 ≈ 1.12 quantize to exactly zero—the model loses fine-grained differentiation across roughly half its activation range. A threshold of 500 was chosen empirically to balance accuracy (fewer BF16 exemptions = smaller model) against precision loss.
-
-**Result**: 12 of 40 MoE layers are BF16-exempt. Outlier layers span the full depth: {1, 19, 31, 37, 39, 65, 69, 71, 73, 75, 77, 79}. The early outliers (1, 19, 31) likely correspond to embedding-space projections and early routing paths that see high-variance input distributions. Layers 37–79 dominate (9 of 12 outlier layers are in the deepest third of the model). 936 MoE Linear modules (= 1,320 total MoE Linears − 384 BF16-exempt) remain W4A4.
-
-| Component | Count | Format |
-|-----------|-------|--------|
-| MoE Linear modules (W4A4) | **936** | NVFP4 W4A4, gs=16 |
-| MoE Linear modules (BF16 exempt) | **384** | BF16 (12 layers × 16 experts × 2 proj) |
-| CCA QKV projections | 160 | BF16 (always) |
-| Routers, norms, embeddings, lm\_head | — | BF16 |
-| **Total target Linears** | **1,320** | 936 W4A4 + 384 BF16-exempt |
-
-### 4.4 Global-Scale Convention
-
-vLLM's CUTLASS NVFP4 kernel reads `input_global_scale` as a divisor: it computes `block_scale = igs * vec_max / 6.0`. We store `igs = 2688 / max_abs_activation`, so the kernel computes `block_scale = (2688/max_abs) * vec_max / 6.0 = 448 * vec_max / max_abs`, which maps the per-group maximum to FP4 maximum (448) and scales all values proportionally.
-
-Weight scales use the dual convention: `weight_global_scale = max_abs_weight / 2688`, and `weight_scale_fp8` stores pre-multiplied values `= (raw_weight_scale / max_abs) * 2688`. The kernel's dequantization recovers the original weight: `W_dequant = unpack_fp4(W_packed) * weight_scale_fp8 * weight_global_scale`.
-
-### 4.5 Checkpoint Design
-
-The clean checkpoint contains:
-- **W4A4 Linear layers**: `weight_packed` (uint8, shape `[N, K/2]`), `weight_scale_fp8` (E4M3, shape `[N, K/16]`), `weight_global_scale` (fp32, scalar), `input_global_scale` (fp32, scalar).
-- **BF16 Linear layers**: `weight` (BF16) only—no quant-specific keys.
-- **MoE expert format** (FusedMoE): `w13_weight_packed` (shape `[E, 2N, K/2]`), `w13_weight_scale` (shape `[E, 2N, K/16]`), plus global scales and input scales per layer.
-
-BF16-exempt layers carry zero quant-specific tensors. This design makes the checkpoint unambiguous: the presence of `weight_packed` is the sole signal that a module is quantized. No loading code needs to guess from layer indices or config fields.
+An earlier claim that this cost was "not measurable" came from an underpowered
+*unpaired* test and has been withdrawn. Comparing two quantizations of one base
+model on the same items is a paired design, and discarding that pairing discards
+the statistical power.
 
 ---
 
-## 5. Inference Infrastructure
+## 4. Inference infrastructure
 
-### 5.1 vLLM Source Build for SM120
+### 4.1 vLLM source build for SM120
 
-Pre-built vLLM 0.20.2 wheels do not include SM120 NVFP4 CUTLASS kernels. We compile from source:
+vLLM 0.20.2 compiled from source with `TORCH_CUDA_ARCH_LIST=12.0`, enabling
+`cutlass_scaled_fp4_mm_sm120a` and `cutlass_fp4_group_mm`. No custom CUDA was
+written. These kernels exist in the vLLM source tree but are absent from
+pre-built wheels, which is the entire reason a source build is required.
 
-```bash
-cd /home/ttimm/vllm-src
-TORCH_CUDA_ARCH_LIST=12.0 MAX_JOBS=8 pip install -e . --no-build-isolation
-```
+### 4.2 CUDA graph capture is broken on SM120, do not enable it
 
-This enables `ENABLE_NVFP4_SM120` in the CMake build, compiling:
-- `cutlass_scaled_fp4_mm_sm120a` — W4A4 GEMM for Linear layers, CUTLASS Sm120 BlockScaledTensorOp, BF16 output
-- `cutlass_fp4_group_mm` — W4A4 Group MoE GEMM, SM120 dispatch, both operands FP4
+**This section replaces the original paper's §5.3, which recommended the
+opposite.**
 
-Build time: ~75 minutes. Verification: `torch.ops._C.cutlass_scaled_mm_supports_fp4(120)` returns `True`.
+CUDA graph capture computes numerically incorrect results for this model on
+consumer Blackwell. The failure is silent. Under greedy decoding the model
+returns fluent text with no relationship to the prompt.
 
-### 5.2 Mixed-Precision MoE Loading
+A backend sweep isolates the cause:
 
-vLLM's `map_unquantized_backend()` function did not originally map `moe_backend='cutlass'` to a triton fallback for unquantized layers. This single addition enables mixed-precision loading:
+| Backend | With CUDA graphs |
+|---|---|
+| `flashinfer_cutlass` (default) | garbage |
+| `cutlass` | garbage |
+| `marlin` (weight-only) | garbage |
+| Any backend, `enforce_eager=True` | correct |
 
-```python
-# vllm/model_executor/layers/fused_moe/oracle/unquantized.py
-def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend:
-    mapping = {
-        "cutlass": UnquantizedMoeBackend.TRITON,  # ← this line
-        "triton": UnquantizedMoeBackend.TRITON,
-        ...
-    }
-```
+`marlin` is the decisive datapoint. It is weight-only and barely touches the FP4
+MoE path, yet it fails identically. Three architecturally unrelated compute paths
+failing the same way under capture, and all succeeding without it, points at
+graph capture itself rather than any kernel.
 
-With a clean checkpoint, this is the **only** required vLLM modification. W4A4 MoE layers dispatch to `VLLM_CUTLASS` (SM120 group GEMM); BF16-exempt MoE layers dispatch to Triton. The routing is entirely determined by the presence or absence of `w13_weight_scale` in the checkpoint.
+We later ruled out a second axis. vLLM issue #41651 describes an SM120-specific
+bug with a close signature (FlashInfer attention plus FP8 KV cache plus CUDA
+graphs producing random output on long prompts) with `TRITON_ATTN` as a
+workaround. Testing `attention_backend="TRITON_ATTN"` with graphs enabled:
+capture succeeded cleanly, 35 of 35 graphs captured, and output was still
+garbage. Two independent axes, four kernel combinations, all fail under capture.
 
-### 5.3 CUDA Graph Capture
+**`enforce_eager=True` is mandatory, not a tuning preference.**
 
-vLLM's CUDA graph capture (`enforce_eager=False`, the default) works without modification on this mixed-precision configuration. Graph capture covers:
-- 51 piecewise batch sizes (1–512)
-- 35 full-graph sizes (1–256)
-- Total estimated CUDA graph memory: 2.75 GiB
+### 4.3 Speculative decoding
 
-With CUDA graphs, the model avoids Python dispatch overhead and CUDA kernel launch latency for each of the 80 decoder layers per decode step. The throughput impact is decisive.
+vLLM's built-in n-gram speculative decoding gives a validated 2.2x speedup on
+code-editing prompts (21.11 versus 9.62 tok/s median, 5 repetitions each) and
+essentially nothing on free-form generation, which is expected since it relies on
+overlap between prompt and output. It is lossless: rejection sampling preserves
+the output distribution exactly, unlike the `enforce_eager` requirement, which is
+a correctness constraint rather than a speed tradeoff.
 
-### 5.4 Loading
-
-The checkpoint loads in ~40 seconds via `safetensors` from a Windows filesystem (9P protocol, mounted in WSL2). Loading weight count: 6,792. VRAM consumed by model weights: **8.82 GiB** (vs. 17 GiB BF16).
-
----
-
-## 6. Evaluation
-
-### 6.1 Quantization Quality
-
-We evaluate on standard lm-eval tasks using `lm_eval` with the `vllm` backend (`batch_size="auto"`, `max_model_len=4096`, `moe_backend=cutlass`). All evaluations run with CUDA graphs enabled.
-
-**Table 3: W4A4 NVFP4 accuracy vs. prior W4A4 baseline (no mixed-precision).**
-
-| Task | Shots | W4A4 baseline (no MP) | W4A4 mixed-precision (ARC-mix) | Delta |
-|------|:-----:|:---------------------:|:------------------------------:|:-----:|
-| ARC-Easy (acc\_norm) | 0 | 67.3% | **68.6%** | +1.3% |
-| ARC-Challenge (acc\_norm) | 25 | N/A | **48.8%** | — |
-| HellaSwag (acc\_norm) | 0 | 60.5% | **61.5%** | +1.0% |
-| Winogrande (acc) | 5 | N/A | **58.0%** | — |
-
-*Baseline: W4A4 max-abs calibration only, no mixed precision (session 8). Final column: mixed-precision (12 BF16 MoE layers, threshold=500) + ARC-aware calibration (977 samples × 1024 tokens including ARC-Easy 15%, ARC-Challenge 10%, HellaSwag 15%). Total evaluation time: ~65 min on RTX 5070 Ti.*
-
-*BF16 reference scores for ARC/HellaSwag are not published by Zyphra; the official benchmarks focus on reasoning tasks (see Tables 1–2). Our W4A4 ARC scores therefore represent a lower bound on quantization quality relative to BF16.*
-
-### 6.2 Throughput
-
-Throughput measured on RTX 5070 Ti (16 GB VRAM, SM120, 40 CUs), WSL2, CUDA 13.2.
-
-| Configuration | Tokens/sec | Notes |
-|---------------|:----------:|-------|
-| W4A4 NVFP4, CUDA graphs, batch=1 | **102.6** | Single-stream decode |
-| W4A4 NVFP4, CUDA graphs, batch=8 | **407.4** | Batch decode |
-| W4A4 NVFP4, eager mode, batch=1 | 8.0 | `enforce_eager=True` |
-| Path A BF16 dequant (no CUTLASS) | 0.9 | Session 2 baseline, Python loop |
-
-CUDA graphs provide a **12.8× speedup** over eager mode. The transition from Python dequant (Path A, session 2) to CUTLASS SM120 kernels (Path B, session 8) yielded a **114× total speedup** from the initial 0.9 tok/s baseline.
-
-### 6.3 Model Size
-
-| Checkpoint | Size | vs BF16 |
-|-----------|------|---------|
-| BF16 (original) | 17.0 GiB | 1.0× |
-| W4A4 NVFP4 (fully quantized, hypothetical) | ~6.0 GiB | 2.8× smaller |
-| W4A4 NVFP4 (mixed-precision, 384 BF16 Linears) | 8.9 GiB | **1.91× smaller** |
-
-The size gap between mixed-precision (8.9 GiB) and theoretical fully-W4A4 (~6 GiB) is the cost of keeping 29% of MoE Linears (384 of 1,320) at BF16. This overhead is a direct consequence of the FusedMoE uniform quantization constraint (§7.2): those 12 layers' BF16 weight tensors together contribute ~2.9 GiB.
-
-The 8.9 GiB checkpoint leaves ~7.1 GiB of VRAM free for KV cache at `gpu_memory_utilization=0.85` on a 16 GB device, enabling 16K+ context windows in a configuration where BF16 would not fit at all.
+One cost surfaces only at serve time: vLLM disables async scheduling when n-gram
+speculative decoding is active. That is not accounted for in the 2.2x figure.
 
 ---
 
-## 7. Technical Discoveries and Contributions
+## 5. Throughput
 
-### 7.1 The Global-Scale Convention Bug
+Measured over 5 independent process invocations per configuration on an idle GPU,
+`enforce_eager=True`, reporting median and range. Repetitions go between
+invocations rather than inside one run, because that is where the variance lives.
 
-The most consequential discovery was an inverted global-scale convention in the initial checkpoint. Our quantize script stored `igs = max_abs / 6` (the wrong direction), and `weight_global_scale` was left uninitialized (yielding values like `6.17e+22`). The CUTLASS kernel produced NaN-valued logits, which manifested as uniform collapse to token\_id=0 (pad token) for every prompt—a silent failure with no kernel error.
+| | uniform (6.02 GB) | mixed (9.46 GB) |
+|---|---:|---:|
+| Single-stream, median (range) | 9.52 (9.48 to 9.84) tok/s | 9.51 (9.45 to 9.81) tok/s |
+| Batch-8, median (range) | 73.4 (72.2 to 74.9) tok/s | 74.4 (72.8 to 75.7) tok/s |
+| Batch-8 scaling | 7.71x (96% of ideal) | 7.82x (98% of ideal) |
 
-The correct convention (§4.4) was reverse-engineered from the CT library source: `_compute_global_scale = scale_data.max * quant_data.max / max_val_pos`, where `scale_data.max = 6.0` (FP4 max) and `quant_data.max = 448.0` (FP8 E4M3 max), giving `igs = 6.0 * 448.0 / max_abs = 2688 / max_abs`. A round-trip verifier (`scripts/verify_w4a4_dequant.py`) confirmed the convention by comparing dequantized W4A4 weights against the original BF16 weights, showing mean relative error of 0.96–1.16%—within the ~1.5% noise floor expected for NVFP4 block quantization at group-size 16.
+**On being slower than weight-only quantization.** A community GGUF of this model
+reportedly reaches 45.9 tok/s on an RTX 4070 Ti, a slower GPU. That is not a
+defect in this work. Decode at batch-1 is memory-bandwidth-bound, so quantizing
+activations adds dequantization work without relieving the actual bottleneck.
+Weight-only quantization is expected to win at batch-1 by design. W4A4's
+advantage is footprint and batched throughput, visible in the near-ideal batch-8
+scaling above.
 
-### 7.2 FusedMoE Uniform Quantization Constraint
-
-vLLM's `FusedMoE` module requires all experts within a layer to use the same quantization scheme—a constraint inherited from the fused GEMM kernel's uniform dispatch path. Attempting per-expert mixed-precision (W4A4 for inlier experts, BF16 for outlier experts within the same layer) would require a separate execution path for each expert, negating the fused-expert performance benefit.
-
-Our dynamic exemption operates at the layer level: if any expert within a layer has `max_abs > 500`, the entire layer is kept BF16. This is conservative (we exempt 12 layers rather than the minimum 2–4 individual experts that exceed the threshold) but correct.
-
-### 7.3 Compressed-Tensors Calibration Interference
-
-The llm-compressor's `apply_quantization_config()` silently replaces `nn.Linear.forward` with a fake-quantization wrapper that produces NaN outputs. This wrapper runs during the calibration forward pass, corrupting all subsequent hidden states. The fix is to restore the original `nn.Linear.forward` immediately after `apply_quantization_config()` before beginning calibration.
-
-This issue would affect any compressed-tensors W4A4 quantization pipeline that uses llm-compressor's calibration hooks and was not previously documented.
-
----
-
-## 8. Related Work
-
-**Consumer NVFP4 inference**: Prior to this work, no publicly available W4A4 NVFP4 checkpoint of ZAYA1-8B existed. Community quantizations (10 repositories as of May 2026) used BNB NF4, MXFP4, ONNX, or MLX formats—none of which provide Blackwell-native hardware acceleration. The community MXFP4 quantization (OsaurusAI) failed to load due to weight shape mismatches with the Zyphra vLLM fork; NF4 (barozp) produces broken inference due to CCA attention incompatibility with BNB's forward hooks.
-
-**W4A8 and W4A4 quantization**: SmoothQuant [Xiao et al., 2023] and LLM.int8() [Dettmers et al., 2022] pioneered activation-aware weight quantization. More recent work—QuaRot [Ashkboos et al., 2024], QuIP# [Tseng et al., 2024]—demonstrates W4A4 near-losslessly on dense models. NVFP4's block-structured format differs from per-channel or per-tensor quantization: each group of 16 weights shares a FP8 scale, and a global fp32 scale maps activation maxima to the FP4 grid. This two-level hierarchy provides 4-bit-equivalent compression with finer granularity than naive 4-bit uniform quantization.
-
-**MoE quantization**: Quantizing sparse MoE models presents unique challenges absent in dense models. (1) Expert activation sparsity: with top-1 routing, 15 of 16 experts receive zero tokens per step—calibration must accumulate statistics across many tokens to observe all experts. (2) Outlier heterogeneity: our data shows that max\_abs values vary over 10× between the most and least extreme experts within a single layer, making per-layer uniform quantization lossy for outlier experts. (3) Fused expert kernels: efficient MoE serving requires all experts to share a quantization scheme (uniform block structure, same kernel path)—per-expert mixed-precision would require separate dispatch overhead that negates the fused GEMM benefit.
-
-**Blackwell inference**: NVIDIA's Blackwell architecture (SM120) introduces dedicated FP4 tensor core instructions. vLLM's upstream source contains SM120 CUTLASS kernels but they are excluded from binary wheels, requiring a source build for consumer Blackwell deployment.
+We attempted to reproduce the 45.9 figure directly on matched hardware across
+five independent build, version and flag combinations. All hit the same
+non-deterministic hang: the same binary and command runs cleanly once and hangs
+on an identical rerun, immune to SIGTERM. We ruled out the model, the CUDA
+toolkit version and the llama.cpp commit, and filed it upstream
+(microsoft/WSL#41361). The comparison therefore remains unverified on matched
+hardware.
 
 ---
 
-## 9. Conclusion
+## 6. Accuracy
 
-We have demonstrated that ZAYA1-8B—a SOTA reasoning model with 760M active parameters—can be served at **102.6 tok/s** on a consumer RTX 5070 Ti via W4A4 NVFP4 quantization with mixed-precision MoE, using pre-compiled SM120 CUTLASS kernels and CUDA graph capture. The resulting checkpoint occupies 8.9 GiB (vs. 17 GiB BF16), fitting comfortably within a 16 GB VRAM budget with room for a substantial KV cache.
+### 6.1 Loglikelihood tasks, paired
 
-The primary technical contributions are:
+Exact-binomial McNemar on discordant items, joined per `doc_id`, 14,319 items per
+checkpoint across four pure-loglikelihood tasks. No generation, so these are
+immune to the unterminated-reasoning artifact described below.
 
-1. A layer-wise GPU calibration pipeline that handles CCA attention's CUDA-only operations correctly.
-2. Dynamic mixed-precision MoE exemption that preserves accuracy on the 12 deepest layers with outlier activations, requiring only a one-line vLLM patch for loading.
-3. Documentation of three quantization-specific failure modes (global-scale convention inversion, fake-quant forward hook corruption, FusedMoE uniform quantization constraint) that apply to any CT-based NVFP4 pipeline.
-4. The first W4A4 NVFP4 ZAYA1-8B checkpoint that loads without model-architecture patches, enabling reproducible deployment by the open-source community.
+| Task | Metric | n | 6.02 GB | 9.46 GB | Δ pp | 95% CI | p |
+|---|---|---:|---:|---:|---:|---|---:|
+| hellaswag | acc | 10,042 | 45.79% | 46.49% | -0.71 | [-1.26, -0.15] | 0.0140 |
+| arc_challenge | acc | 1,172 | 37.97% | 36.95% | +1.02 | [-1.42, +3.47] | 0.4522 |
+| winogrande | acc | 1,267 | 56.20% | 59.04% | -2.84 | [-6.04, +0.36] | 0.0906 |
+| piqa | acc | 1,838 | 69.42% | 70.02% | -0.60 | [-2.41, +1.21] | 0.5564 |
 
-The model's benchmark position (Table 2) demonstrates that sub-1B active-parameter MoE models can compete with 3–32B active-parameter dense and sparse models on reasoning tasks. Among the models evaluated, ZAYA1-8B uniquely achieves this with 0.7B active parameters—meaning each forward pass involves roughly the same compute as a 1B dense model—while matching or exceeding models such as Intellect-3 (12B active, 106B total) and Mistral-Small-4-119B (6B active, 119B total) on AIME 2026. Our W4A4 quantization removes the remaining barrier—memory footprint—making this reasoning quality accessible on the hardware most researchers and practitioners actually own: a single consumer GPU with 16 GB VRAM.
+Only HellaSwag reaches significance. The smaller tasks are underpowered and
+cannot rule out larger effects, which we state rather than reading the
+non-significant point estimates as findings.
+
+### 6.2 Generative benchmarks
+
+Loglikelihood tasks score pre-written continuations. They measure ranking, never
+production. That is a structural blind spot, and this project has been caught by
+it: a checkpoint incapable of forming a coherent sentence once scored 61.18% on
+HellaSwag. The following measure generation.
+
+Uniform 6.02 GB checkpoint, `enforce_eager=True`, reasoning budget 4096,
+temperature 0.6 and top_p 0.95 per Zyphra's published recommendation, seed 42.
+
+| Benchmark | Score | 95% CI | n |
+|---|---:|---|---:|
+| **HumanEval** | **72.6%** pass@1 | [65.3, 78.8] | 164 |
+| **GSM8K** | **65.5%** | [62.9, 68.0] | 1,319 |
+| **MMLU-Pro** (0-shot) | **48.1%** | [44.5, 51.8] | 700 |
+
+**HumanEval.** Published comparisons place Qwen 3 7B at roughly 68 to 72 percent
+and Llama 3 8B at 62 to 65 percent, both at full precision. This checkpoint
+matches or exceeds them while running 4-bit weights and activations in 6.02 GB.
+Zyphra publishes no HumanEval figure for ZAYA1, so this appears to be the first
+measurement at any precision.
+
+**MMLU-Pro requires a caveat, and it is not quantization damage.** Zyphra reports
+74.2% for BF16. Our 48.1% is not comparable: lm-eval's MMLU-Pro task is 5-shot
+and this harness is 0-shot, because the standard harness scores unterminated
+reasoning traces as the answer. Published INT4 loss on MMLU-Pro runs around 1.6
+pp, so a 26 pp quantization cost would be far outside anything documented, and
+§6.1 already bounds this checkpoint at -0.71 pp HellaSwag. Zyphra's number also
+comes from a private harness with undisclosed generation limits.
+
+**GSM8K is a regression check, not a capability claim.** GSM8K is heavily
+contaminated: removing contaminated items has been shown to cost up to 13 pp.
+Read 65.5% as evidence that quantization did not break arithmetic reasoning.
+
+### 6.3 Why budget forcing, and why the budget is 4096
+
+ZAYA1's reasoning trace frequently never terminates within a feasible budget.
+lm-eval does support reasoning models via `think_end_token`, but it strips
+post-hoc: `generation.split(token)[-1]`. When the model never emits the closing
+tag, that returns the entire unterminated trace as the answer and scores it. This
+is the artifact that put IFEval at 19.8% against an 85.58% reference.
+
+We therefore implement budget *forcing*: generate bounded reasoning, then inject
+the closing tag and decode the answer that gets scored. All scoring still uses
+lm-eval's own extraction regexes and HF `evaluate`'s sandboxed `code_eval`, so
+only the generation protocol is custom.
+
+The budget was determined empirically, not assumed. Doubling it to 8192 and
+comparing with paired McNemar on identical items:
+
+| Benchmark | 4096 | 8192 | Δ | 95% CI | p |
+|---|---:|---:|---:|---|---:|
+| GSM8K | 65.50% | 65.66% | +0.15 pp | [-2.74, +3.04] | 0.9581 |
+| MMLU-Pro | 48.14% | 51.43% | +3.29 pp | [-0.22, +6.66] | 0.0673 |
+
+Neither is significant, and 8192 costs roughly 3x the wall time. Ceiling hits
+barely moved (GSM8K 78% to 71%): this model keeps thinking regardless of the room
+it is given.
 
 ---
 
-## 8. Limitations and Future Work
+## 7. Technical findings
 
-**Benchmark coverage**: The primary evaluation targets—GPQA-Diamond (71.0%), MMLU-Pro (74.2%), IFEval (85.58%)—are the benchmarks Zyphra published for the BF16 reference model, making them the natural comparison ceiling. These are generation-based (model output, not log-likelihood), which reflects the model's actual reasoning quality rather than classification calibration. Standard lm-eval ARC/HellaSwag results are included as quantization-quality proxies. Benchmark runs on the W4A4 checkpoint are in progress as of 2026-05-22; Table 2 will be updated with results.
+### 7.1 The global-scale convention
 
-**BF16 outlier layer penalty**: 12 of 40 MoE layers stay at BF16, contributing ~3.2 GiB of overhead. The fully-W4A4 hypothetical checkpoint would be ~6 GiB. Rotation-based methods (QuaRot [Ashkboos et al., 2024]) suppress activation outliers by applying orthogonal transforms before quantization; applying these to ZAYA1-8B's MoE layers could eliminate or reduce the BF16 exemptions. The FusedMoE uniform quantization constraint means the rotation must be absorbed into the preceding linear's output weights (not into the LayerNorm gamma, which does not commute with rotation), then the rotated BF16 model is re-quantized.
+NVFP4 `global_scale` must be `2688 / max_abs` in divisor form, with
+`weight_scale_fp8` pre-multiplied by it. The inverse convention loads without
+error and produces NaN or zero logits, which manifests downstream as pad-token
+collapse rather than an exception.
 
-**Single-GPU scope**: All results are from a single RTX 5070 Ti (SM120). Tensor-parallel deployment across multiple Blackwell GPUs is not tested and may require additional patches for the mixed-precision layer routing.
+### 7.2 FusedMoE uniform quantization constraint
 
-**Calibration distribution sensitivity**: ARC-aware calibration improves ARC/HellaSwag scores but may slightly reduce accuracy on tasks with different activation distributions (e.g., math reasoning, which activates different expert subsets). Future work should calibrate on a more representative mix of the model's intended use-case distribution.
+vLLM's FusedMoE requires uniform quantization across all experts in a layer.
+Protecting 24 offending Linears therefore costs 384 exemptions and about 3.5 GB,
+an overhead 17x larger than a naive per-module estimate would suggest. This is
+the structural reason mixed-precision MoE is expensive, and the reason the
+uniform checkpoint exists.
 
-**Future work**:
-- **Upstream vLLM patch**: submit the `unquantized.py` one-liner as a PR to enable mixed-precision NVFP4 MoE loading without source patching.
-- **Rotation-based outlier suppression**: QuaRot/SingleQuant integration for MoE layers — absorb rotation into preceding linear output weights, then re-quantize with MR-GPTQ. Expected to convert some BF16-exempt layers back to W4A4 and reduce the checkpoint from 8.84 GiB toward ~7–8 GiB.
-- **MR-GPTQ weight correction**: Hessian-weighted column-by-column correction during calibration (arXiv:2509.23202). Implemented in `scripts/quantize_zaya_ct_nvfp4.py` (`--mr-gptq` flag); to be applied on the rotated checkpoint. Expected +2–4 pp on hard reasoning tasks.
-- **Agentic fine-tuning**: use this W4A4 checkpoint as the inference backend for the target BFCL-v4/τ² improvement goal (SFT+GRPO on multi-step tool-use trajectories).
-- **Generation-based eval**: pass@1 evaluation on AIME 2026 samples to directly quantify W4A4 quality retention on the model's primary benchmark.
+### 7.3 Compressed-tensors calibration interference
+
+`apply_quantization_config` silently replaces `Linear.forward` with a
+NaN-producing fake-quant path. Plain `nn.Linear.forward` must be restored before
+calibrating activation scales.
+
+### 7.4 CUDA graph capture corrupts output (§4.2)
+
+Documented above. This is the failure that invalidated the original paper.
+
+### 7.5 EBSS calibration produced a degenerate corpus
+
+Expert-balanced sample selection is a published idea for MoE calibration:
+resample so under-activated experts receive adequate coverage. Our implementation
+produced a checkpoint that scored at chance level (HellaSwag acc_norm 60.29% to
+25.75%) while exiting cleanly with byte-identical weights.
+
+Isolation took three steps. Sampling `weight_packed`, `weight_scale` and
+`weight_global_scale` across both checkpoints showed them byte-identical, leaving
+only `input_global_scale` differing, which narrowed the fault to activation
+calibration without any re-runs. That value is inflated on 95.8% of 1,320 modules
+with a median ratio of 1.68x, implying observed activation maxima roughly 60% of
+their true size, which saturates the FP4 range at inference. The cause was the
+selection loop: it appended the winning sample but never masked it from later
+rounds, yielding a 977-row corpus containing **3 unique rows, one repeated 972
+times** (738 unique token ids versus 28,397).
+
+After fixing selection to sample without replacement, coverage was *unchanged*.
+That is arithmetic rather than bad luck: selecting N samples without replacement
+from a corpus of N is a permutation, and `activation_max` is a running maximum,
+an order-independent and frequency-independent statistic. **No reordering of a
+fixed corpus can change a maximum.** EBSS is therefore inapplicable to max-based
+activation calibration by construction, and we closed it rather than leaving it
+as a maybe-retry.
+
+### 7.6 The pattern worth generalising: exit code 0 means nothing
+
+Three independent failures in this project shared one signature. Each completed
+with exit code 0. Each produced artifacts that passed every structural check:
+correct file sizes, valid manifests, well-formed JSON. Each was entirely invalid.
+
+| Failure | What passed | What was actually wrong |
+|---|---|---|
+| CUDA graph capture | Clean generation, fluent text | Output unrelated to the prompt |
+| EBSS calibration | 6.02 GB checkpoint, valid manifest | Chance-level accuracy |
+| Missing `max_model_len` | Every log line correct | Generation cut by context, not budget |
+
+Only measured behaviour caught any of them. The operational rules we now follow:
+judge long runs by artifact content rather than exit status; validate that
+artifacts *parse* rather than that they exceed a size threshold (a 200-byte floor
+once rejected a valid 188-byte result); and never treat a plausible-looking
+output as evidence of a working path.
+
+A related harness trap, encountered twice: using
+`tokenizer.apply_chat_template()` followed by `llm.generate()` produces fluent
+but completely off-topic output on this model, because the template emits
+`bos_token` itself and the path risks a doubled BOS. It mimics a corrupted
+checkpoint convincingly. `llm.chat()` is correct.
+
+---
+
+## 8. What this model is for
+
+Disabling the reasoning trace via ZAYA1's own chat template flag
+(`enable_thinking=False`, which pre-closes the reasoning block) produces a large
+speedup and a large accuracy loss. Paired McNemar on identical items:
+
+| Benchmark | Thinking | No thinking | Δ | p | Wall time |
+|---|---:|---:|---:|---:|---|
+| HumanEval | 72.6% | 43.9% | **-28.66 pp** | <0.0001 | 15 m to 2 m |
+| MMLU-Pro | 48.1% | 26.7% | **-21.43 pp** | <0.0001 | 39 m to 4 m |
+| GSM8K | 65.5% | 48.1% | **-17.36 pp** | <0.0001 | 63 m to 8 m |
+
+Roughly 8.5x faster overall for 17 to 29 accuracy points. All highly significant,
+with no interval near zero, and discordant counts confirming it is not noise (59
+versus 12, 203 versus 53, 402 versus 173).
+
+**ZAYA1's accuracy is its reasoning, and its reasoning is what makes it slow. The
+two cannot be separated.** No serving configuration turns it into a responsive
+interactive assistant, and this holds for any quantization format: even at 45
+tok/s a 4096-token reasoning trace still costs roughly 90 seconds per turn.
+
+Where it does fit:
+
+- Batch and asynchronous work. Batch-8 reaches 74 tok/s at 96 to 98 percent of
+  ideal scaling in 6.02 GB, so per-item latency is irrelevant and throughput per
+  gigabyte is strong.
+- Hard single questions where waiting is acceptable.
+- Test-time-compute harnesses, which is Zyphra's own framing.
+- Serving several concurrent users on one 16 GB card.
+
+Where the reasoning flag is still useful is per-request routing rather than a
+global switch. Notably 12, 53 and 173 items respectively were solved *only* with
+reasoning disabled, so some tasks are actively hurt by overthinking.
+
+---
+
+## 9. Limitations
+
+- **Single seed.** All accuracy figures come from one seed. The confidence
+  intervals reported cover item-sampling uncertainty and say nothing about
+  generation stochasticity at temperature 0.6. Multi-seed repetition is the
+  correct next step and has not been done.
+- **MMLU-Pro is 0-shot and on a 700-item stratified subset** of 12,032, not the
+  full set, and not comparable to 5-shot published figures.
+- **No local BF16 baseline is possible.** At 17.7 GB the source model does not
+  fit in 16 GB, so retention against BF16 cannot be measured on this hardware.
+- **The weight-only comparison is unverified** on matched hardware, blocked by
+  the llama.cpp hang described in §5.
+- **Generative results are from the uniform checkpoint only.** The mixed
+  checkpoint was not re-measured on these benchmarks.
+- **The reasoning comparison is protocol versus protocol** (two-stage budget
+  forcing versus single-stage direct), not a single-variable ablation.
+
+---
+
+## 10. Conclusion
+
+ZAYA1-8B can be quantized to 4-bit weights and 4-bit activations and served on a
+16 GB consumer card at 6.02 GB, reaching 72.6% pass@1 on HumanEval, which matches
+or exceeds published full-precision results for comparable 7 to 8B models. The
+accuracy cost of removing all BF16 exemptions is bounded at -0.71 pp HellaSwag
+over 14,319 paired items.
+
+Single-stream throughput of 9.5 tok/s is slower than weight-only quantization of
+the same model, for a principled reason rather than an implementation defect, and
+the scheme's advantage appears in footprint and batched throughput instead.
+
+The model is not suitable as an interactive coding assistant, and we establish
+that with measurement rather than assertion: its accuracy depends on reasoning
+that costs 17 to 29 points to remove, and that reasoning is what makes it slow.
+
+The most transferable result is not a number. Three independent failures in this
+work produced clean exit codes, valid-looking artifacts, and entirely invalid
+results, including the ones that appeared in the first version of this paper.
+Serving-stack correctness on new hardware cannot be assumed from the absence of
+errors, and published numbers are worth exactly as much as the verification
+behind them.
 
 ---
 
 ## Appendix A: Reproducibility
 
-**Hardware**: NVIDIA RTX 5070 Ti (16 GB GDDR7, SM120, Blackwell), WSL2 on Windows 11, CUDA 13.2.
-
-**Software**: vLLM 0.20.2 (compiled from source), PyTorch 2.7.0+cu132, llm-compressor 0.4.1, lm-eval 0.4.x.
-
-**Checkpoint path**: `zaya1-8b-nvfp4-w4a4/` (project root). Checkpoint contains 6,792 tensors; loads in ~40 seconds on a 9P (WSL2 virtio) filesystem.
-
-**Required vLLM modification** (the only one): add `"cutlass": UnquantizedMoeBackend.TRITON` to `map_unquantized_backend()` in `vllm/model_executor/layers/fused_moe/oracle/unquantized.py`.
-
-**Quantization command**:
 ```bash
-source /home/ttimm/vllm-env/bin/activate
-cd "/mnt/c/Users/ttimm/Documents/Project Portfolio/zaya1-godspeed"
-python3 scripts/quantize_zaya_ct_nvfp4.py \
-    --scheme w4a4 \
-    --calibration-data data/calibration/arcmix/calibration_data.pt \
-    --mixed-precision-threshold 500
+# 1. Build vLLM from source with SM120 NVFP4 kernels
+cd vllm-src && TORCH_CUDA_ARCH_LIST=12.0 MAX_JOBS=8 pip install -e . --no-build-isolation
+
+# 2. Quantize
+python scripts/build_calibration_data.py --arc-mix
+python scripts/quantize_zaya_ct_nvfp4.py --scheme w4a4 --mixed-precision-threshold 500
+
+# 3. Serve (enforce-eager is mandatory for correctness)
+bash scripts/serve.sh
+
+# 4. Generative benchmarks
+bash scripts/run_budget_forced_suite.sh
+
+# 5. Paired comparison between two runs
+python scripts/compare_budget_forced.py <run_a.json> <run_b.json>
 ```
 
-**Inference command**:
-```python
-from vllm import LLM, SamplingParams
-llm = LLM(
-    model="./zaya1-8b-nvfp4-w4a4",
-    dtype="bfloat16",
-    moe_backend="cutlass",
-    max_model_len=4096,
-    gpu_memory_utilization=0.85,
-)
-```
+**Environment.** vLLM 0.20.2 source build (commit `6e2f9c5`), FlashInfer
+0.6.8.post1, torch 2.11.0+cu130, driver 610.88, RTX 5070 Ti 16 GB, WSL2.
 
-**lm-eval command**:
-```bash
-lm_eval --model vllm \
-    --model_args pretrained=./zaya1-8b-nvfp4-w4a4,dtype=bfloat16,moe_backend=cutlass,max_model_len=4096 \
-    --tasks arc_easy,arc_challenge,hellaswag,winogrande \
-    --num_fewshot 0,25,0,5 \
-    --batch_size auto \
-    --device cuda
-```
+**Checkpoints.** `Ttimms/zaya1-8b-nvfp4-w4a4` (9.46 GB) and
+`Ttimms/zaya1-8b-nvfp4-w4a4-uniform` (6.02 GB) on Hugging Face.
+
+**Code.** https://github.com/t-timms/zaya1-godspeed
 
 ---
 
 ## References
 
-1. Washbourne et al. "ZAYA1-8B Technical Report." arXiv:2605.05365, May 2026.
-2. NVIDIA Corporation. "NVIDIA Blackwell Architecture Technical Brief." 2025.
-3. CUTLASS 4.4.2. NVIDIA Corporation. https://github.com/NVIDIA/cutlass, 2025.
-4. Kwon et al. "Efficient Memory Management for Large Language Model Serving with PagedAttention." SOSP 2023.
-5. Xiao et al. "SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models." ICML 2023.
-6. Dettmers et al. "LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale." NeurIPS 2022.
-7. Ashkboos et al. "QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs." arXiv:2404.00456, 2024.
-8. llm-compressor. Neural Magic. https://github.com/vllm-project/llm-compressor, 2025.
-9. Beeching et al. "Open LLM Leaderboard v2." HuggingFace, 2024.
+1. Zyphra. ZAYA1-8B technical report. arXiv:2605.05365.
+2. Muennighoff et al. s1: Simple test-time scaling (budget forcing).
+3. Biderman et al. Lessons from the Trenches on Reproducible Evaluation of
+   Language Models. arXiv:2405.14782.
+4. Kalibera and Jones. Rigorous Benchmarking in Reasonable Time.
+5. Pape, Evertz and Schönherr. The Silent Hyperparameter. arXiv:2605.19537.
+6. NVIDIA CUTLASS issue #3096, SM120 NVFP4 MoE grouped GEMM.
+7. vLLM issue #41651, FlashInfer plus FP8 KV cache plus CUDA graphs on SM120.
+8. Microsoft WSL issue #41361, non-deterministic CUDA hang on SM120 under WSL2.

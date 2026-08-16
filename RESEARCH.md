@@ -1821,7 +1821,7 @@ ZAYA1-8B uses Qwen-style `<|im_start|>` / `<|im_end|>` tokens with `<think>` / `
 | W4A4 checkpoint + layer-wise GPU calibration | 6 | ✅ |
 | Loader + forward pass on SM120 (global-scale bug fixed) | 7 | ✅ |
 | lm-eval baseline (ARC-Easy 67-68%, HellaSwag 60-61%) | 8 | ✅ |
-| CUDA graphs (102 tok/s) | 8 | ✅ |
+| ~~CUDA graphs (102 tok/s)~~ **RETRACTED, corrupts output on SM120 (§5.14)** | 8 | ❌ |
 | SOAR global-scale optimization | 9 | ✅ |
 | EBSS calibration + MR-GPTQ | 9–13 | ✅ |
 | ARC-mix calibration, mixed-precision checkpoint | 14 | ✅ |

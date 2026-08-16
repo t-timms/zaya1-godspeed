@@ -256,6 +256,12 @@ MoE layers with max-abs > 500 exempted to BF16 MLP (`--mixed-precision-threshold
 CUDA graphs enabled (no `enforce_eager`). Single-token throughput: **102 tok/s**
 (12.8× over eager mode). Batch-8: **407 tok/s**.
 
+> 🔴 **RETRACTED (2026-08-14). Historical record only, do not cite.** These
+> numbers, and the accuracy figures in the table above them, were all measured
+> with CUDA graph capture enabled, a path since confirmed to produce numerically
+> incorrect output on SM120. Corrected values: 9.5 tok/s single-stream, ~74 tok/s
+> batch-8, `enforce_eager=True`. See Session 17 and `RESEARCH.md` §5.14.
+
 **SOAR baseline (with arcmix calibration):**
 ARC-Easy 67.2%, ARC-Challenge 47.8%, HellaSwag acc_norm 61.4%, Winogrande 58.6%.
 

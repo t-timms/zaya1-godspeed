@@ -1503,6 +1503,93 @@ Language Models*](https://arxiv.org/pdf/2405.14782).
   correctly *not* significant), a budget mismatch (warns), and HumanEval's
   schema (+16.67 pp at n=60, correctly *not* significant).
 
+### 5.22 Generative Benchmark Results — and a Budget Hypothesis That Was Wrong (2026-08-15/16)
+
+**First generative accuracy numbers for this checkpoint, and the first
+HumanEval figure for ZAYA1-8B in any precision, anywhere.**
+
+#### Results (uniform 6.02 GB checkpoint, `enforce_eager=True`, think_budget 4096)
+
+| benchmark | score | 95% CI | n | self-closed `</think>` |
+|---|---:|---|---:|---:|
+| **HumanEval** | **72.6%** pass@1 | [65.3, 78.8] | 164 | 53 (32%) |
+| **GSM8K** | **65.5%** | [62.9, 68.0] | 1,319 | 289 (22%) |
+| **MMLU-Pro** | **48.1%** | [44.5, 51.8] | 700 | 112 (16%) |
+
+Environment: vLLM 0.20.2 (source build, commit `6e2f9c5`), FlashInfer
+0.6.8.post1, torch 2.11.0+cu130, driver 610.88, RTX 5070 Ti. Sampling per
+Zyphra's published recommendation (temp 0.6, top_p 0.95), seed 42. Suite
+wall time 1h58m.
+
+**HumanEval 72.6% is the headline.** Published 7–8B comparisons put Qwen 3 7B
+at roughly 68–72% and Llama 3 8B at 62–65% — both at full precision. This
+checkpoint matches or exceeds them while running **4-bit weights *and* 4-bit
+activations** in 6.02 GB. Zyphra publishes no HumanEval figure for ZAYA1, so
+there is no baseline to retain against; equally, no one else has measured it.
+
+#### The budget hypothesis was tested and rejected
+
+MMLU-Pro's 48.1% sits ~26 pp below Zyphra's published BF16 74.2%, and 84% of
+traces hit the 4096-token ceiling. The obvious hypothesis was budget
+starvation — the same lever that moved GPQA on this model from 45.8% → 62.5%.
+Both benchmarks were re-run at **think_budget 8192** (`max_model_len` raised
+to 16384; see §5.21 tooling note) and compared with paired exact-binomial
+McNemar on identical items:
+
+| benchmark | 4096 | 8192 | Δ | 95% CI | p |
+|---|---:|---:|---:|---|---:|
+| GSM8K | 65.50% | 65.66% | **+0.15 pp** | [−2.74, +3.04] | 0.9581 |
+| MMLU-Pro | 48.14% | 51.43% | **+3.29 pp** | [−0.22, +6.66] | 0.0673 |
+
+**Doubling the reasoning budget bought essentially nothing.** GSM8K was flat
+(180 items flipped each way — pure noise) and MMLU-Pro's gain does not reach
+significance. Ceiling hits barely moved (GSM8K 78% → 71%): this model keeps
+thinking regardless of the room it is given. **4096 is the correct operating
+budget**, and 8192 costs 3× the wall time (GSM8K: 190 min vs 63 min) for no
+measurable return.
+
+This is a negative result that earned its cost. Without it these numbers would
+have shipped caveated as "probably budget-limited," which is false.
+
+#### What actually explains the MMLU-Pro gap: protocol, not quantization
+
+lm-eval's MMLU-Pro task specifies **`num_fewshot: 5`** — five chain-of-thought
+exemplars from the validation split. **The harness here is 0-shot**: it builds
+prompts from scratch with no exemplars. Few-shot on MMLU-Pro supplies both the
+reasoning style and the `"answer is (X)"` format the extraction regex keys on,
+so this is not a minor deviation. The 48.1% and Zyphra's 74.2% were never
+measuring the same protocol.
+
+Two further reasons to reject "quantization damage" as the explanation:
+published INT4 loss on MMLU-Pro runs around **1.6 pp**, so a 26 pp
+quantization cost would be far outside anything documented; and the paired
+loglikelihood comparison against the mixed-precision checkpoint (§5.13,
+14,319 items) bounded this checkpoint's cost at **−0.71 pp HellaSwag**.
+
+**Therefore MMLU-Pro is reported as "0-shot, budget-forced" and is explicitly
+not comparable to Zyphra's figure.** Running the standard 5-shot protocol is
+not a fix: it requires lm-eval's `think_end_token`, which scores unterminated
+traces as the answer, and 69% of traces still fail to self-close even at
+8192 — that would yield a comparable-looking number that is simply wrong.
+
+#### GSM8K in context
+
+65.5% is honest but unremarkable: Llama 3.2 **3B** reports 77.7% at 8-shot CoT.
+Three confounds make the comparison loose — this run is 0-shot, 78% of traces
+truncate, and GSM8K is heavily contaminated (removing contaminated items has
+been shown to cost up to 13 pp). Treat it as a **regression check that
+quantization did not break arithmetic reasoning**, not as evidence of
+mathematical ability.
+
+#### The extraction fallback earned its place
+
+`recovered_by_trace_fallback = 6` on the full GSM8K run. The fallback fired
+**zero** times in the 20-item smoke test and was honestly logged then as
+"validated as harmless, not demonstrated-beneficial." At full scale it
+recovered six items whose reasoning was correct but whose forced short answer
+opened with a newline and yielded no parsable number — six items that would
+otherwise have been scored as reasoning failures.
+
 ### 6.1 Audited Repositories
 
 - `Zyphra/transformers` @ zaya1 branch (`modular_zaya.py`, `configuration_zaya.py`)

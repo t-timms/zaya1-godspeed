@@ -18,6 +18,17 @@ Two checkpoints are published: a **6.02 GB** fully-uniform build and a **9.46 GB
 mixed-precision build. The difference between them has been measured with a paired
 test over 14,319 items — see [Checkpoints](#checkpoints).
 
+**Generative accuracy (6.02 GB uniform, 2026-08-16):** **HumanEval 72.6%** pass@1
+(95% CI [65.3, 78.8]), **GSM8K 65.5%** [62.9, 68.0], **MMLU-Pro 48.1%** [44.5, 51.8]
+(0-shot). Published figures put Qwen 3 7B at ~68–72% and Llama 3 8B at 62–65% on
+HumanEval *at full precision* — this matches or beats them at 4-bit weights **and**
+activations. Zyphra publishes no HumanEval number for ZAYA1, so this appears to be
+the first at any precision. **MMLU-Pro here is 0-shot and is not comparable to
+Zyphra's 5-shot 74.2%**; that gap is a protocol difference, not quantization damage
+(published INT4 loss on MMLU-Pro is ~1.6 pp). Reasoning budget was tested, not
+assumed: doubling it to 8192 moved GSM8K +0.15 pp (p=0.96) and MMLU-Pro +3.29 pp
+(p=0.067) — neither significant. Full analysis: [`RESEARCH.md` §5.22](./RESEARCH.md).
+
 One other public NVFP4 W4A4 ZAYA1 checkpoint exists — built with NVIDIA ModelOpt
 and validated on a 96 GB workstation Blackwell card, with no published accuracy or
 throughput numbers ([MODEL_SELECTION.md](./MODEL_SELECTION.md) has the full

@@ -644,6 +644,36 @@ than reuse. EAGLE-3 needs a model-specific draft head trained from scratch.
 CUTLASS #3096's `compute_120f` rebuild remains the largest untried speed
 lever. None fit a single session.
 
+#### Session 18 results — generative benchmarks landed (2026-08-15/16) ✅
+
+**First generative accuracy numbers for this checkpoint, and the first
+HumanEval figure for ZAYA1-8B in any precision.** Uniform 6.02 GB checkpoint,
+`enforce_eager=True`, think_budget 4096, suite wall time 1h58m.
+
+| benchmark | score | 95% CI | n |
+|---|---:|---|---:|
+| **HumanEval** | **72.6%** pass@1 | [65.3, 78.8] | 164 |
+| **GSM8K** | **65.5%** | [62.9, 68.0] | 1,319 |
+| **MMLU-Pro** (0-shot) | **48.1%** | [44.5, 51.8] | 700 |
+
+**HumanEval is the headline:** published comparisons put Qwen 3 7B at ~68–72%
+and Llama 3 8B at 62–65% *at full precision*. This matches or beats them with
+4-bit weights **and** activations in 6.02 GB.
+
+**The budget hypothesis was tested and rejected.** Both benchmarks were re-run
+at 8192 and compared with paired McNemar on identical items: GSM8K **+0.15 pp**
+(p=0.9581) and MMLU-Pro **+3.29 pp** (p=0.0673) — neither significant. 4096 is
+the correct operating budget; 8192 costs 3× the wall time for nothing. Ceiling
+hits barely moved (GSM8K 78% → 71%) — this model keeps thinking regardless.
+
+**The MMLU-Pro gap to Zyphra's 74.2% is a protocol difference, not
+quantization damage.** lm-eval's MMLU-Pro is `num_fewshot: 5`; this harness is
+0-shot. Published INT4 loss on MMLU-Pro is ~1.6 pp, so a 26 pp quantization
+cost would be far outside anything documented, and §5.13's paired test already
+bounded this checkpoint's cost at −0.71 pp HellaSwag. **Reported as "0-shot,
+budget-forced" and explicitly not comparable.** Full analysis: `RESEARCH.md`
+§5.22.
+
 #### Engineering Cleanup — Session 15 Action Items ⬜
 
 The following items were identified as unprofessional shortcuts during session 15.

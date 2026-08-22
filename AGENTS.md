@@ -1,4 +1,4 @@
-# AGENTS.md — zaya1-godspeed
+# AGENTS.md — zaya1-nvfp4-w4a4
 
 ## Project Overview
 

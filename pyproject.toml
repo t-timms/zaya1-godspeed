@@ -1,5 +1,5 @@
 [project]
-name = "zaya1-godspeed"
+name = "zaya1-nvfp4-w4a4"
 version = "0.3.2"
 description = "Completing ZAYA1-8B with agentic multi-turn tool calling via teacher-distilled SFT+GRPO. DeepSeek V4 Pro teacher, Godspeed harness, Unsloth + TRL."
 requires-python = ">=3.11"

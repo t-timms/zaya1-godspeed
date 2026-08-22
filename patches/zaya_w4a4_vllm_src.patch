@@ -30,7 +30,7 @@ Blackwell (RTX 5070 Ti, SM120):
 
 Apply with:
     cd /path/to/vllm-src
-    patch -p1 < /path/to/zaya1-godspeed/patches/zaya_w4a4_vllm_src.patch
+    patch -p1 < /path/to/zaya1-nvfp4-w4a4/patches/zaya_w4a4_vllm_src.patch
 
 ---
  vllm/model_executor/models/zaya.py | 64 ++++++++++++++++++++++++++++--

@@ -5464,7 +5464,7 @@ wheels = [
 ]
 
 [[package]]
-name = "zaya1-godspeed"
+name = "zaya1-nvfp4-w4a4"
 version = "0.2.0"
 source = { virtual = "." }
 dependencies = [

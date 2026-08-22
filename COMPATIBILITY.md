@@ -314,4 +314,4 @@ next iteration could adopt from DeepSeek V4 Pro:
 - [Zyphra vLLM Fork](https://github.com/Zyphra/vllm/tree/zaya1-pr)
 - [Zyphra Transformers Fork](https://github.com/Zyphra/transformers/tree/zaya1)
 - [NVIDIA NIM — DeepSeek V4 Pro](https://build.nvidia.com/deepseek-ai/deepseek-v4-pro)
-- [Godspeed Coding Agent](https://github.com/omnipotence-eth/godspeed-coding-agent)
+- [Godspeed Coding Agent](https://github.com/t-timms/godspeed-coding-agent)

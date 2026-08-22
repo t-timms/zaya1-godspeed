@@ -532,7 +532,7 @@ python scripts/compare_budget_forced.py <run_a.json> <run_b.json>
 **Checkpoints.** `Ttimms/zaya1-8b-nvfp4-w4a4` (9.46 GB) and
 `Ttimms/zaya1-8b-nvfp4-w4a4-uniform` (6.02 GB) on Hugging Face.
 
-**Code.** https://github.com/t-timms/zaya1-godspeed
+**Code.** https://github.com/t-timms/zaya1-nvfp4-w4a4
 
 ---
 

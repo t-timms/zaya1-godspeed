@@ -1,6 +1,6 @@
 # Research Document: Completing ZAYA1-8B with Agentic Multi-Turn Tool Calling
 
-**Project**: zaya1-godspeed  
+**Project**: zaya1-nvfp4-w4a4  
 **Experiment Lead**: Tremayne Timms  
 **Date**: May 12, 2026  
 **Status**: Phase 2 Stage 2 CUTLASS SM120 kernels compiled and verified (May 15, 2026, session 4). Path B W4A4 Phase 1 dry-run completed with CPU calibration failure, layer-wise GPU calibration designed (May 17, 2026). NVFP4 Compressed-Tensors ZAYA1-8B serves correctly via vLLM on RTX 5070 Ti (Blackwell sm_120). Greedy decoding answers "The capital of France is" → " Paris." and produces coherent BST reasoning. All 4,244 weights load; ~5.5 GiB VRAM; ~0.86–0.90 tok/s on Path A (on-the-fly Python dequant). Five upstream vLLM/Zaya fixes applied. Stage 2 CUTLASS speedup next; W4A4 weight+activation quantization parallel track.

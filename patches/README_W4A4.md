@@ -41,13 +41,13 @@ itself — apply your overlay first, then this patch.
 
 ```bash
 cd /path/to/vllm-src
-patch -p1 < /path/to/zaya1-godspeed/patches/zaya_w4a4_vllm_src.patch
+patch -p1 < /path/to/zaya1-nvfp4-w4a4/patches/zaya_w4a4_vllm_src.patch
 ```
 
 Dry-run first to verify it'll apply cleanly:
 
 ```bash
-patch --dry-run -p1 < /path/to/zaya1-godspeed/patches/zaya_w4a4_vllm_src.patch
+patch --dry-run -p1 < /path/to/zaya1-nvfp4-w4a4/patches/zaya_w4a4_vllm_src.patch
 ```
 
 If the patch reports "Reversed (or previously applied) patch detected",
@@ -58,7 +58,7 @@ your tree already has the changes — you're done.
 After applying, run the smoke test against a W4A4 checkpoint:
 
 ```bash
-python3 /path/to/zaya1-godspeed/scripts/test_zaya1_w4a4_inference.py
+python3 /path/to/zaya1-nvfp4-w4a4/scripts/test_zaya1_w4a4_inference.py
 ```
 
 Expected output (the model continues differently across seeds; key signal

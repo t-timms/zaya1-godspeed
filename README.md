@@ -1,5 +1,6 @@
 # zaya1-nvfp4-w4a4
 
+[![lint](https://img.shields.io/github/actions/workflow/status/t-timms/zaya1-nvfp4-w4a4/lint.yml?style=flat-square&label=lint)](https://github.com/t-timms/zaya1-nvfp4-w4a4/actions/workflows/lint.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://www.python.org/downloads/)
 [![vLLM](https://img.shields.io/badge/vLLM-0.20.2%20source%20build-1E90FF?style=flat-square)](https://github.com/vllm-project/vllm)
 [![CUTLASS](https://img.shields.io/badge/CUTLASS-4.4.2%20SM120-76B900?style=flat-square)](https://github.com/NVIDIA/cutlass)

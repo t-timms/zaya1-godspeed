@@ -1,4 +1,4 @@
-# zaya1-godspeed
+# zaya1-nvfp4-w4a4
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://www.python.org/downloads/)
 [![vLLM](https://img.shields.io/badge/vLLM-0.20.2%20source%20build-1E90FF?style=flat-square)](https://github.com/vllm-project/vllm)
@@ -291,7 +291,7 @@ quantization damage.
 ## Repo map
 
 ```
-zaya1-godspeed/
+zaya1-nvfp4-w4a4/
 ├── scripts/
 │   ├── quantize_zaya_ct_nvfp4.py       # NVFP4 W4A4 quantization + layer-wise activation calibration
 │   ├── build_calibration_data.py       # Calibration mix (incl. ARC/HellaSwag phase-2 mix)

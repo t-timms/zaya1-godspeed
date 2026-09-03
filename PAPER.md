@@ -47,8 +47,9 @@ bounds the accuracy difference between them at -0.71 pp HellaSwag.
 Measured throughput is 9.5 tok/s single-stream and roughly 74 tok/s at batch-8,
 the latter at 96 to 98 percent of ideal scaling. Single-stream is slower than
 weight-only 4-bit quantizations of the same model, which is expected: decode at
-batch-1 is memory-bandwidth-bound, so quantizing activations adds work without
-relieving the bottleneck. W4A4's advantage is memory footprint and batched
+batch-1 is not compute-bound, so quantizing activations adds work without
+relieving the actual bottleneck, which a roofline check places in per-step
+dispatch overhead rather than weight traffic (RESEARCH.md §5.17a). W4A4's advantage is memory footprint and batched
 throughput, not latency.
 
 On generative benchmarks the 6.02 GB checkpoint scores 72.6% pass@1 on HumanEval
@@ -252,8 +253,10 @@ invocations rather than inside one run, because that is where the variance lives
 
 **On being slower than weight-only quantization.** A community GGUF of this model
 reportedly reaches 45.9 tok/s on an RTX 4070 Ti, a slower GPU. That is not a
-defect in this work. Decode at batch-1 is memory-bandwidth-bound, so quantizing
-activations adds dequantization work without relieving the actual bottleneck.
+defect in this work. Decode at batch-1 is not compute-bound, so quantizing
+activations adds dequantization work without relieving the actual bottleneck —
+which a roofline check (RESEARCH.md §5.17a) places in per-step dispatch overhead,
+not weight traffic.
 Weight-only quantization is expected to win at batch-1 by design. W4A4's
 advantage is footprint and batched throughput, visible in the near-ideal batch-8
 scaling above.

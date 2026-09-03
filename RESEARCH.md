@@ -1109,8 +1109,12 @@ quantization at the same bit-width. This is documented, expected behavior for
 the quantization scheme, not a bug — and it plausibly explains a substantial
 part of the gap chased since §5.14, without requiring anything to be fixed.**
 
-Decode at batch-1 is memory-bandwidth-bound: the dominant cost is loading
-weights from VRAM, not the matrix multiplication itself. Quantizing
+Decode at batch-1 is not compute-bound, so quantizing activations has no
+bottleneck to relieve. (**Correction, 2026-09-03:** this passage originally read
+"memory-bandwidth-bound: the dominant cost is loading weights from VRAM". That is
+the correct general argument for a dense model and the wrong diagnosis for this
+one — see the roofline check in §5.17a. The conclusion is unchanged; the
+mechanism was wrong.) Quantizing
 activations only pays off when compute is the bottleneck — batched serving or
 prefill — because it lets both operands use Blackwell's FP4 tensor cores at
 full rate. At batch-1, there's no compute bottleneck to relieve, so
@@ -1189,8 +1193,8 @@ sampling shortcut; it's provably identical output, just fewer full forward
 passes to get there).
 
 **Relevance to §5.17:** this doesn't change the batch-1 W4A4-vs-weight-only
-tradeoff finding — that's about the underlying decode step's memory-bandwidth
-bound, which n-gram decoding works *around* by skipping steps entirely when
+tradeoff finding — that's about the underlying decode step's fixed per-step
+cost (see the §5.17a correction), which n-gram decoding works *around* by skipping steps entirely when
 speculation succeeds, not by making each step faster. Compatible, additive
 levers, not competing explanations.
 
@@ -1897,3 +1901,89 @@ moves accuracy.
 - Phase 5: QLoRA SFT on verified trajectories, GRPO policy improvement
 - Phase 6: BFCL-v4, τ² evaluation
 - Phase 7: Deploy to Godspeed driver catalog
+
+---
+
+## 5.17a Correction: the batch-1 bottleneck is dispatch overhead, not bandwidth
+
+*Added 2026-09-03. Supersedes the mechanism given in §5.17 and in the four other
+places this repo repeated it (ROADMAP, PAPER x2, README). The **conclusion** of
+§5.17 — a weight-only quant is expected to beat W4A4 at batch-1, and W4A4's
+payoff arrives under batching — is unchanged and still correct. The **reason**
+given for it was wrong, and the wrong reason pointed at the wrong fix.*
+
+### The roofline check
+
+§5.17 asserted that batch-1 decode is memory-bandwidth-bound: that the dominant
+cost is streaming weights from VRAM. That is the standard argument for a dense
+model. It does not survive arithmetic here.
+
+| Quantity | Value | Source |
+|---|---|---|
+| Active params per token | ~760 M | ZAYA1-8B is 760 M active / 8.4 B total |
+| Effective bits/param (NVFP4 + FP8 block scales, group 16) | ~4.5 | §5.3 |
+| Weight traffic per token | ~0.43 GB, call it ~0.5 GB with the BF16 exemptions and the top-1 expert read | derived |
+| RTX 5070 Ti memory bandwidth | 896 GB/s | GDDR7, 256-bit, 28 Gbit/s |
+| **Bandwidth-bound floor** | **~0.56 ms/token → ~1,790 tok/s** | derived |
+| **Measured** | **9.5 tok/s = 105 ms/token** | §5.15 |
+
+**The measured rate is ~0.5% of the bandwidth roofline** — roughly 190x off. Per
+layer that is 1.3 ms for a layer with ~9.5 M active parameters. The GPU is idle
+for essentially the entire decode step. Whatever limits this model at batch-1, it
+is not weight traffic, and therefore not the weight format.
+
+The plausible dominant cost is host-side: kernel launch plus MoE routing and CCA
+dispatch across 80 sequential layers with no CUDA graph to amortize any of it.
+vLLM's own documentation notes that "MoE routing and expert execution increase
+both kernel count and heterogeneity, incurring host overhead during decode", and
+that `FULL_AND_PIECEWISE` is the most performant mode "especially for low latency
+with small models or MoEs" — the exact configuration this project cannot currently
+use.
+
+**Corroboration.** The community GGUF figure in §5.16 (45.9 tok/s on an RTX 4070
+Ti, 504 GB/s) is ~4.6% of *its* roofline. Also overhead-bound, just ~9x less so —
+consistent with llama.cpp's much lower per-token host cost, and a better
+explanation of that 4.8x gap than bit-width.
+
+### What this changes
+
+1. **Nothing about the published accuracy or throughput numbers.** They were
+   measured, not derived from this claim.
+2. **The framing "W4A4's cost is inherent to batch-1 physics" is too generous to
+   the current configuration.** Some of the gap is the scheme; an unknown and
+   possibly large share is `enforce_eager`.
+3. **It relocates the highest-value engineering lever.** If the limit were
+   bandwidth, only a smaller checkpoint would help. Since it is per-step overhead,
+   restoring CUDA graphs is worth up to ~10x — and note the retracted §5.14 figure
+   of 102.6 tok/s *was* the graph-enabled measurement. That number is not a target,
+   it is evidence about the size of the overhead being paid.
+
+### The untested variable
+
+The §5.14 sweep varied the **MoE backend** (`flashinfer_cutlass`, `cutlass`,
+`marlin`) and concluded "the fault is graph capture itself, not any one kernel".
+It never varied the **CUDA-graph mode**. vLLM exposes five (`NONE`, `PIECEWISE`,
+`FULL`, `FULL_DECODE_ONLY`, `FULL_AND_PIECEWISE`); grep confirms no occurrence of
+`cudagraph_mode` or `compilation_config` anywhere in this repo before today.
+
+A hypothesis §5.14 did not consider: **the corruption is in CCA, not the MoE
+kernels.** CCA carries convolutional state (`cca: true`, `mamba_cache_dtype:
+float32`) and in-place state buffers are a known graph-capture hazard. That would
+explain the otherwise puzzling observation that Marlin — which barely touches the
+FP4 MoE path — failed too. `PIECEWISE` is precisely the mode that leaves attention
+eager while capturing the rest, so if CCA is the culprit, `PIECEWISE` should
+generate correctly *and* recover most of the graph win.
+
+Independently: §5.14 was diagnosed on vLLM 0.20.2. This box now runs vLLM 0.26.0 /
+FlashInfer 0.6.14 / torch 2.11.0+cu130. The default mode may simply have been fixed
+upstream. Related but *not* the same failure: FlashInfer #2776 is an
+`cudaErrorIllegalAddress` **crash** from FP4 MoE decode-kernel alignment on
+SM120/SM121, whereas this project's symptom is silent wrong output.
+
+`scripts/sweep_cudagraph_modes.sh` tests all five modes with a coherence gate that
+structurally prevents a throughput number from being recorded for a mode whose
+output was never verified — the failure that produced the §5.14 retraction.
+
+**Nothing in this section is a measurement of a fix.** It is a corrected diagnosis
+and a testable hypothesis. No throughput claim changes until the sweep runs and the
+winning mode passes a real eval.

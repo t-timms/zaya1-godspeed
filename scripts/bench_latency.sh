@@ -20,7 +20,12 @@
 # Usage:
 #   scripts/bench_latency.sh <model-path> <label> [batch] [gpu-mem]
 #
-# Measured 2026-08-09, RTX 5070 Ti 16 GB, vLLM 0.20.2:
+# RETRACTED 2026-08-14, kept here as a record of what NOT to cite. The two
+# figures below were measured with CUDA graphs enabled (this script does not pass
+# --enforce-eager), a configuration later confirmed to generate numerically WRONG
+# output on SM120. The speed was real; the tokens were garbage. See RESEARCH.md
+# 5.14. Corrected eager figures are 9.5 tok/s single / ~74 tok/s batch-8.
+# Measured 2026-08-09, RTX 5070 Ti 16 GB, vLLM 0.20.2 (DO NOT CITE):
 #   ./zaya1-8b-nvfp4-w4a4-arcbase  6.02GB  1  0.85  -> 104.7 tok/s, KV 156,981 tok
 #   ./zaya1-8b-nvfp4-w4a4          9.46GB  1  0.92  -> 105.3 tok/s, KV  46,802 tok
 # The 9.46 GB checkpoint FAILS at 0.85 (no KV memory) and at 1.0 (desktop holds

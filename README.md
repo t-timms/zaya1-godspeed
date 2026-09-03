@@ -236,9 +236,10 @@ so than the accuracy difference.
 >
 > **Update, same day:** the gap likely has a principled cause independent of
 > the hang above. Activation quantization (W4A4) gives no speed benefit at
-> batch-1 — decode there is memory-bandwidth-bound, and quantizing
-> activations only helps when compute is the bottleneck (batched serving,
-> prefill). Weight-only quantization is expected to win at batch-1 by design;
+> batch-1 — decode there is not compute-bound, so quantizing activations has
+> no bottleneck to relieve; it helps only under batched serving or prefill.
+> (Corrected 2026-09-03: originally "memory-bandwidth-bound"; a roofline check
+> puts the real limit in per-step dispatch overhead — RESEARCH.md §5.17a.) Weight-only quantization is expected to win at batch-1 by design;
 > W4A4's advantage is memory footprint and batched throughput, which this
 > project already measures at batch-8 (73–74 tok/s, 96–98% of ideal scaling).
 > Detail: `RESEARCH.md` §5.17.

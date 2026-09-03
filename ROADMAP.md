@@ -544,8 +544,10 @@ a Windows driver / WSL kernel update, not another build variation.
 Went looking for engineering levers to close the gap and found a better
 answer first: **activation quantization (W4A4) provides no speed benefit at
 batch-1 and can be slower than weight-only quantization** — decode at
-batch-1 is memory-bandwidth-bound, and quantizing activations only pays off
-when compute is the bottleneck (batched serving, prefill). This is
+batch-1 is not compute-bound, so quantizing activations has no bottleneck to
+relieve; it pays off only under batched serving or prefill. (Corrected
+2026-09-03: this originally said "memory-bandwidth-bound" — a roofline check
+puts the real limit in per-step dispatch overhead. See RESEARCH.md §5.17a.) This is
 documented, expected behavior for the scheme, not a bug. The §5.16 comparison
 (45.9 tok/s weight-only vs. 9.5 tok/s W4A4) was comparing two different
 design points, not a fair speed contest. W4A4's actual advantage — memory

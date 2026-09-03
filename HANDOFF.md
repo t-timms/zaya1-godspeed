@@ -149,3 +149,78 @@ should not overlap with 4 — both want the full card.
    10 minutes, not 4 hours.
 3. Under any sampling randomness, repeat 3–5× before comparing.
 4. Do not overwrite prior outputs; rename or write to a new directory.
+
+---
+
+## STEP 1 RESULT — 2026-09-03: THE GATE FAILED. DO NOT RUN STEP 2.
+
+The dry run executed and reported:
+
+```
+Applying quantization config: 100%|██████████| 80/80
+Restored plain Linear.forward on 80 quantized Linears for BF16 calibration
+```
+
+**80 Linears.** That is the stop condition: 40 `self_attn.o_proj` + 40
+`mlp.gate.down_proj`. The entire MoE was not targeted. A full run from this state
+would spend 1-4 h producing a checkpoint with its experts still in BF16.
+
+It then crashed separately during calibration:
+
+```
+AttributeError: 'ZayaRotaryEmbedding' object has no attribute 'None_inv_freq'
+```
+
+### Correction: `register_zaya_moe.py` does not fix this pipeline
+
+The registration is correct about *what* is wrong and would work inside
+llm-compressor's `oneshot` pipeline. **But this script does not use that pipeline.**
+It calls `compressed_tensors.apply_quantization_config(model, config)` directly
+(lines 1085, 1870, 1970) and never imports `llmcompressor`. llm-compressor's MoE
+linearizer runs *inside its own pipeline*, so a registry entry has no effect here.
+The registry entry is kept because it is needed by whichever route is taken, but on
+its own it changes nothing.
+
+### Two real blockers, in priority order
+
+**1. The experts are invisible to the quantizer.** `ZayaExperts` holds
+`gate_up_proj` / `down_proj` as `nn.Parameter`; `apply_quantization_config` walks
+`nn.Linear` modules. Options:
+
+- **(a) Linearize explicitly before applying the config** — import
+  `llmcompressor.modeling.moe.linearize` / `linear_experts` and convert
+  `ZayaExperts` into per-expert `nn.Linear` modules in this script, then apply the
+  config as now. Most surgical; reuses tested upstream code; keeps the bespoke
+  calibration path intact. **Recommended.**
+- **(b) Port the whole script to llm-compressor `oneshot`** — the registry entry
+  then works as designed, but it discards this script's bespoke W4A4
+  `input_global_scale` calibration, which is where much of the project's value is.
+- (c) Teach `apply_quantization_config` about batched parameters — upstream work,
+  out of scope.
+
+**2. `ZayaRotaryEmbedding` / transformers 5 rotary API.** `None_inv_freq` means a
+`layer_type` of `None` is being used to look up a per-layer-type `inv_freq` buffer.
+The refactored config *does* declare `layer_types`, so something in the load or
+calibration path is not passing it through. Must be fixed before any calibration
+forward pass runs, independently of blocker 1.
+
+### Calibration data — fixed, with one gap
+
+`scripts/build_calibration_data.py` was broken against the transformers 5
+chat-template API (commit `59bc382`); rebuilt output is
+`data/calibration/calibration_data.pt`, **826 samples x 1024 tokens**.
+
+It reproduces the published recipe's per-source counts **exactly** — math500 151,
+gsm8k 153, humaneval 38, mbpp 25, alpaca 153, writingprompts 153, glaive 153 —
+with one exception: **TriviaQA now yields 0 texts** where the published run got 153.
+826 = 979 - 153. Fix the TriviaQA loader before the real run if calibration fidelity
+to the published recipe matters; it is not a blocker for re-testing the gate.
+
+`--arc-mix` is **not** the published recipe (it is the Phase 2 ARC-aware 11-source
+mix). The published one is the **default**. An earlier version of this file said
+otherwise.
+
+### What is still true
+
+Steps 3-5 are unchanged and still correct once a loadable checkpoint exists. The
+CUDA-graph sweep remains blocked behind that.

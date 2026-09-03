@@ -69,6 +69,9 @@ logs/
 
 # Debug/scratch scripts
 scripts/check_*.py
+# ...except the coherence gate, which is a shipped part of the
+# cudagraph sweep, not a scratch script.
+!scripts/check_coherence.py
 scripts/test_switzerchees.py
 scripts/verify_switzerchees.py
 

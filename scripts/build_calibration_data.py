@@ -483,10 +483,24 @@ def _encode_text_for_packing(tokenizer: Any, text: str, hard_cap: int) -> list[i
             truncation=True,
             max_length=hard_cap,
         )
-    # apply_chat_template with return_tensors=None returns a list (or list-of-list for batched).
+    # transformers >=5 returns a BatchEncoding here even with return_tensors=None,
+    # where older versions returned a plain list of ids. Iterating a BatchEncoding
+    # yields its KEYS ('input_ids', 'attention_mask'), so the old code silently fed
+    # 2-3 strings per text into the packing buffer instead of ~200 token ids. That
+    # produced both the "source text exhausted" warnings (the buffer never reached
+    # max_length) and the ValueError: too many dimensions 'str' at tensor build.
+    # Verified against transformers 5.14.1, 2026-09-03.
+    if hasattr(tokens, "keys") or hasattr(tokens, "input_ids"):
+        tokens = tokens["input_ids"]
     if tokens and isinstance(tokens[0], list):
         return list(tokens[0])
-    return list(tokens)
+    ids = list(tokens)
+    if ids and not isinstance(ids[0], int):
+        raise TypeError(
+            f"tokenizer returned {type(ids[0]).__name__} elements, not token ids - "
+            "the chat-template API changed again; fix here rather than downstream"
+        )
+    return ids
 
 
 def pack_source_to_chunks(

@@ -34,6 +34,8 @@ speed = [
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+# Bring-up scratch: kept for provenance (RESEARCH.md walks it), not held to lint/format.
+extend-exclude = ["scripts/_debug-archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]

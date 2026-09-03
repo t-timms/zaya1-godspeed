@@ -121,6 +121,13 @@ def main() -> int:
     out_path = pathlib.Path(args.out or f"results/cudagraph_sweep/coherence_{args.mode}.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Validate the reference BEFORE loading a model. Discovering a missing
+    # reference after a full engine init wastes a load and the VRAM with it.
+    if not args.write_reference and not ref_path.exists():
+        print(f"no reference at {ref_path}; run once with --mode NONE --write-reference",
+              file=sys.stderr)
+        return 2
+
     texts = generate(args.model, args.mode, args.gpu_mem, args.max_tokens)
 
     if args.write_reference:
@@ -138,11 +145,6 @@ def main() -> int:
             return 1
         print("verdict: PASS (reference, garbage checks clean)")
         return 0
-
-    if not ref_path.exists():
-        print(f"no reference at {ref_path}; run once with --mode NONE --write-reference",
-              file=sys.stderr)
-        return 2
 
     ref = json.loads(ref_path.read_text(encoding="utf-8"))["outputs"]
 

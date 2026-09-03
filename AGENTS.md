@@ -78,13 +78,13 @@ These ZAYA innovations must not be touched:
 | `scripts/fix_gguf_arch.py` | Rewrite GGUF architecture field | Tool for fixing GGUF arch string in binary |
 | `scripts/remap_to_zaya.py` | Godspeed JSONL → ZAYA ChatML | Must preserve `<zyphra_tool_call>` format |
 | `scripts/mutate_tasks.py` | 200+ variant tasks | 6 mutation types, 30% OOD minimum |
-| `scripts/wsl_fix_moe_scale_routing.py` | Fix scale→FusedMoE param routing in zaya.py | Applies to vLLM WSL install; prevents `quant_method` ValueError. Session 1. |
-| `scripts/wsl_fix_marlin_group_size.py` | Skip Marlin repack for group_size≠16 Linear layers | Applies to vLLM WSL install; enables Python dequant fallback. Session 1. |
-| `scripts/wsl_fix_nvfp4_text_gen.py` | Three text-generation fixes (gate/up split, lm_head dequant, Path A MoE) | Applies to vLLM WSL install AFTER session-1 fixes. Required for coherent output. |
+| `scripts/_debug-archive/wsl_fix_moe_scale_routing.py` | Fix scale→FusedMoE param routing in zaya.py | Applies to vLLM WSL install; prevents `quant_method` ValueError. Session 1. |
+| `scripts/_debug-archive/wsl_fix_marlin_group_size.py` | Skip Marlin repack for group_size≠16 Linear layers | Applies to vLLM WSL install; enables Python dequant fallback. Session 1. |
+| `scripts/_debug-archive/wsl_fix_nvfp4_text_gen.py` | Three text-generation fixes (gate/up split, lm_head dequant, Path A MoE) | Applies to vLLM WSL install AFTER session-1 fixes. Required for coherent output. |
 | `scripts/apply_professional_fixes.py` | Apply 7 production vLLM patches for CT Zaya | Run after vLLM install; includes input_quant guards, CCA calculators, registry |
-| `scripts/wsl_run_smoke.sh` | Smoke test: load NVFP4 CT model via vLLM | Expect exit 0; verifies weight loading + inference init |
-| `scripts/wsl_run_quick_check.sh` | Generation smoke: raw + chat prompt, dtype=bf16 | Expect " Paris..." for raw, BST explanation for chat. Verifies coherent output. |
-| `scripts/wsl_quick_check.py` | Python harness for `wsl_run_quick_check.sh` | Uses Zyphra/ZAYA1-8B tokenizer, prints token ids + decoded text |
+| `scripts/_debug-archive/wsl_run_smoke.sh` | Smoke test: load NVFP4 CT model via vLLM | Expect exit 0; verifies weight loading + inference init |
+| `scripts/_debug-archive/wsl_run_quick_check.sh` | Generation smoke: raw + chat prompt, dtype=bf16 | Expect " Paris..." for raw, BST explanation for chat. Verifies coherent output. |
+| `scripts/_debug-archive/wsl_quick_check.py` | Python harness for `wsl_run_quick_check.sh` | Uses Zyphra/ZAYA1-8B tokenizer, prints token ids + decoded text |
 | `data/generate.py` | Godspeed → ChatML extraction | Legacy — prefer remap_to_zaya.py |
 | `configs/lora_tool_call.yaml` | Single source of truth for hyperparams | rsLoRA, chunked_nll, Liger Kernel, double quant |
 | `patches/` | Runtime monkey-patches + vLLM plugins | `apply_zaya_patches.py` auto-runs in train.py/train_grpo.py |

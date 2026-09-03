@@ -331,7 +331,8 @@ zaya1-nvfp4-w4a4/
 │   ├── eval_gpqa_budget_forced.py      # s1-style budget forcing for GPQA-Diamond
 │   ├── eval_ifeval_budget_forced.py    # Two-stage budget forcing + official IFEval checkers
 │   ├── smoke_test_mixed_precision.py   # Load + coherence + speed gate
-│   └── train.py / remap_to_zaya.py     # QLoRA SFT pipeline (agentic fine-tune phase)
+│   ├── train.py / remap_to_zaya.py     # QLoRA SFT pipeline (agentic fine-tune phase)
+│   └── _debug-archive/                 # bring-up scratch (diagnostics, superseded patches); not on the reproduce path
 ├── RESEARCH.md      # Full debugging log — every bug, root cause, and fix
 ├── PAPER.md         # Write-up draft
 ├── ROADMAP.md       # Phase-by-phase status

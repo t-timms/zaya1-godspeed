@@ -316,7 +316,7 @@ When `chkpt_weight_name` is `...linear_fc1.weight_scale`, `_load_weight` sees `"
 
 **Why this wasn't caught earlier**: The vLLM CompressedTensors pipeline assumes MoE expert weights are stored as flat multi-expert tensors (shape `[E, N, K]`), not per-expert keys with `local_experts.N.` prefixes. In standard deployments, a single `w13_weight_packed` key holds all expert weights and the flat-tensor `weight_loader` uses shard dimensions, not the `local_experts` routing path. Zaya's safetensors use per-expert naming inherited from the GGUF quantization tooling, which triggers the `local_experts` routing branch for the first time.
 
-**Fix** (`scripts/wsl_fix_moe_scale_routing.py`): Added `weight_scale` suffix detection before the existing weight lookup in both the `linear_fc1` and `linear_fc2` branches. The detection precedes the weight lookup — when the checkpoint key ends in `weight_scale`, the code looks up `w13_weight_scale`/`w2_weight_scale` instead. These scale parameters carry `quant_method=FusedMoeWeightScaleSupported.GROUP.value` from the NVFP4 MoE method's `create_weights`, satisfying the `_load_weight` validation. The `weight_loader` is called with the correct shard ID (`"w1"` or `"w2"`) and `loaded_params` tracking continues as normal. The existing `weight_packed` routing is unmodified.
+**Fix** (`scripts/_debug-archive/wsl_fix_moe_scale_routing.py`): Added `weight_scale` suffix detection before the existing weight lookup in both the `linear_fc1` and `linear_fc2` branches. The detection precedes the weight lookup — when the checkpoint key ends in `weight_scale`, the code looks up `w13_weight_scale`/`w2_weight_scale` instead. These scale parameters carry `quant_method=FusedMoeWeightScaleSupported.GROUP.value` from the NVFP4 MoE method's `create_weights`, satisfying the `_load_weight` validation. The `weight_loader` is called with the correct shard ID (`"w1"` or `"w2"`) and `loaded_params` tracking continues as normal. The existing `weight_packed` routing is unmodified.
 
 **Key insight**: The fix is purely a routing correction — it doesn't change any weight-loading logic. The `FusedMoE._load_weight` method already knows how to handle scale parameters correctly; it simply needs to receive the correct parameter. This is why the fix is both minimal (8 lines added per branch) and robust (no new code paths, no risk of breaking existing behavior).
 
@@ -336,7 +336,7 @@ When `chkpt_weight_name` is `...linear_fc1.weight_scale`, `_load_weight` sees `"
 
 **Why this wasn't caught earlier**: ZAYA1-8B is the first model using NVFP4 CompressedTensors with a non-standard group size. Standard deployments use group_size=16, which passes through the hardcoded path silently. The Marlin kernel's autotuner produces `thread_k = -1` when it can't find a valid decomposition, but the kernel itself provides no informative error message — it took cross-referencing the error message, the hardcoded constant, and the model config to identify the mismatch.
 
-**Fix** (`scripts/wsl_fix_marlin_group_size.py`): Added a pre-check in `process_weights_after_loading` before the `prepare_fp4_layer_for_marlin(layer)` call:
+**Fix** (`scripts/_debug-archive/wsl_fix_marlin_group_size.py`): Added a pre-check in `process_weights_after_loading` before the `prepare_fp4_layer_for_marlin(layer)` call:
 
 ```python
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -394,11 +394,11 @@ source /home/ttimm/vllm-env/bin/activate
 export PATH=/usr/local/cuda/bin:$PATH
 
 # Apply fixes (order matters)
-python3 scripts/wsl_fix_moe_scale_routing.py
-python3 scripts/wsl_fix_marlin_group_size.py
+python3 scripts/_debug-archive/wsl_fix_moe_scale_routing.py
+python3 scripts/_debug-archive/wsl_fix_marlin_group_size.py
 
 # Smoke test
-bash scripts/wsl_run_smoke.sh
+bash scripts/_debug-archive/wsl_run_smoke.sh
 ```
 
 **Note**: These fixes modify files inside the WSL vLLM Python installation at `/home/ttimm/vllm-env/lib/python3.12/site-packages/vllm/`. The fix scripts are idempotent — they check for existing patches before applying. Re-running after a vLLM reinstall is safe.
@@ -429,7 +429,7 @@ The downstream NaN cascade comes from the same uninitialized memory in subsequen
 
 For the *scales*, there is a parallel "combined" fast-path at `fused_moe/layer.py:1298` that detects when `loaded_weight.shape[-2] == param.data.shape[-2]` and bypasses narrowing via `_load_combined_w13_weight_scale`. That fast-path is gated on `if "ModelOpt" in quant_method_name` (line 1260). For CompressedTensors, the fast-path is skipped; scale loading falls through to `_load_model_weight_or_group_weight_scale` → `_load_w13` → the same narrowing → up scales never load → stays at `torch.empty` (which happens to read zero on this allocator on this run, but is undefined in general).
 
-**Fix** (`scripts/wsl_fix_nvfp4_text_gen.py`, fix #1+#2): In `ZayaForCausalLM.load_weights`, split *both* `linear_fc1.weight_packed` and `linear_fc1.weight_scale` into `loaded_weight[:half, :]` (gate) and `loaded_weight[half:, :]` (up), and call `fused_moe_module.weight_loader` twice — once with `shard_id="w1"` for gate, once with `shard_id="w3"` for up. After this, `_load_w13`'s narrowing operates on the correct half-tensor and produces the correct layout. Both halves of `w13_weight_packed` and `w13_weight_scale` carry the checkpoint's data with no uninitialized rows.
+**Fix** (`scripts/_debug-archive/wsl_fix_nvfp4_text_gen.py`, fix #1+#2): In `ZayaForCausalLM.load_weights`, split *both* `linear_fc1.weight_packed` and `linear_fc1.weight_scale` into `loaded_weight[:half, :]` (gate) and `loaded_weight[half:, :]` (up), and call `fused_moe_module.weight_loader` twice — once with `shard_id="w1"` for gate, once with `shard_id="w3"` for up. After this, `_load_w13`'s narrowing operates on the correct half-tensor and produces the correct layout. Both halves of `w13_weight_packed` and `w13_weight_scale` carry the checkpoint's data with no uninitialized rows.
 
 **Why this wasn't caught earlier**: Stage 1's smoke test (§5.9.4) only checked weight *count* (4,244/4,244 weights loaded) and exit code. It did not verify weight *content*. A "weight loaded" log entry fires when `weight_loader` returns successfully — it has no way to detect that the loader silently dropped half the tensor.
 
@@ -447,7 +447,7 @@ The `f` prefix is missing — Python logs the literal string `"WARNING: key {chk
 
 **Root Cause**: `ParallelLMHead(quant_config=None)` creates an *unquantized* lm_head layer that registers a single `weight` Parameter (fp16). With `tie_word_embeddings=True`, `tie_weights` rebinds the lm_head to share `model.embed_tokens.weight`. The Zaya `zaya_high_prec=True` path then attaches a custom `_FP32EmbeddingMethod` that calls `torch.mm(x, layer.weight.t(), out_dtype=torch.float32)` — it reads `layer.weight` directly and never goes through any quantization scheme. There is no code path that dequantizes the NVFP4 lm_head from the checkpoint into this fp16 Parameter.
 
-**Fix** (`scripts/wsl_fix_nvfp4_text_gen.py`, fix #2): In `ZayaForCausalLM.load_weights`, buffer `lm_head.weight_packed` and `lm_head.weight_scale` during the load loop (do not pass them to `weight_loader`). After the loop completes, dequantize via `compressed_tensors.compressors.nvfp4.helpers.unpack_fp4_from_uint8` + `compressed_tensors.quantization.lifecycle.forward.dequantize` to a fp32 tensor, cast to the target dtype, and copy into `params_dict["model.embed_tokens.weight"]` (the canonical name under tied embeddings) or `params_dict["lm_head.weight"]` as a fallback. Also fix the broken log line so future loader skips are diagnosable.
+**Fix** (`scripts/_debug-archive/wsl_fix_nvfp4_text_gen.py`, fix #2): In `ZayaForCausalLM.load_weights`, buffer `lm_head.weight_packed` and `lm_head.weight_scale` during the load loop (do not pass them to `weight_loader`). After the loop completes, dequantize via `compressed_tensors.compressors.nvfp4.helpers.unpack_fp4_from_uint8` + `compressed_tensors.quantization.lifecycle.forward.dequantize` to a fp32 tensor, cast to the target dtype, and copy into `params_dict["model.embed_tokens.weight"]` (the canonical name under tied embeddings) or `params_dict["lm_head.weight"]` as a fallback. Also fix the broken log line so future loader skips are diagnosable.
 
 **Why this wasn't caught earlier**: The session-1 smoke test verified the model *initialized*. Initialization does not exercise the lm_head — that only fires during the final projection per generation step. Combined with the broken log line hiding the skip, there was no signal until end-to-end generation was attempted.
 
@@ -459,7 +459,7 @@ The `f` prefix is missing — Python logs the literal string `"WARNING: key {chk
 
 The emulation backend (`Nvfp4QuantizationEmulationTritonExperts`) bypasses Marlin entirely but contains a device-placement bug exposed under WSL: `kE2M1` is initialized at module import time on CPU, and the experts class never moves it to the input device before the unpack step.
 
-**Fix** (`scripts/wsl_fix_nvfp4_text_gen.py`, fix #3 — "Path A"): Rewrite `CompressedTensorsW4A4Nvfp4MoEMethod.apply()` and `process_weights_after_loading()` to bypass both Marlin and emulation. Keep packed FP4 weights (`layer.w13_weight`, `layer.w2_weight`) and per-group scales (`self._w13_scale`, `self._w2_scale`) at original layout, cloned to decouple from any downstream Marlin-prep that might mutate them in place. In `apply()`, dequantize on the fly per call using the same `unpack_fp4_from_uint8` + `dequantize` primitives that the Linear NVFP4 Python-dequant fallback uses (and that produce correct CCA attention output). Execute the MoE dispatch with a manual per-expert loop:
+**Fix** (`scripts/_debug-archive/wsl_fix_nvfp4_text_gen.py`, fix #3 — "Path A"): Rewrite `CompressedTensorsW4A4Nvfp4MoEMethod.apply()` and `process_weights_after_loading()` to bypass both Marlin and emulation. Keep packed FP4 weights (`layer.w13_weight`, `layer.w2_weight`) and per-group scales (`self._w13_scale`, `self._w2_scale`) at original layout, cloned to decouple from any downstream Marlin-prep that might mutate them in place. In `apply()`, dequantize on the fly per call using the same `unpack_fp4_from_uint8` + `dequantize` primitives that the Linear NVFP4 Python-dequant fallback uses (and that produce correct CCA attention output). Execute the MoE dispatch with a manual per-expert loop:
 
 ```python
 for e_id in range(E):
@@ -522,12 +522,12 @@ source /home/ttimm/vllm-env/bin/activate
 export PATH=/usr/local/cuda/bin:$PATH
 
 # Apply fixes (order matters — session 1 first, then session 2)
-python3 scripts/wsl_fix_moe_scale_routing.py       # session 1: scale routing
-python3 scripts/wsl_fix_marlin_group_size.py       # session 1: gs fallback
-python3 scripts/wsl_fix_nvfp4_text_gen.py          # session 2: 3 fixes
+python3 scripts/_debug-archive/wsl_fix_moe_scale_routing.py       # session 1: scale routing
+python3 scripts/_debug-archive/wsl_fix_marlin_group_size.py       # session 1: gs fallback
+python3 scripts/_debug-archive/wsl_fix_nvfp4_text_gen.py          # session 2: 3 fixes
 
 # Smoke test (must use dtype="bfloat16")
-bash scripts/wsl_run_quick_check.sh
+bash scripts/_debug-archive/wsl_run_quick_check.sh
 ```
 
 Expected output: " Paris..." for the raw prompt, coherent BST explanation for the chat prompt. If the model produces all pad tokens (id 0), one of the three session-2 fixes did not apply cleanly — run the patch script with verbose flags or inspect the WSL vllm-env files directly.

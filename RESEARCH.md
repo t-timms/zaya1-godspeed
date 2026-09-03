@@ -1987,3 +1987,138 @@ output was never verified — the failure that produced the §5.14 retraction.
 **Nothing in this section is a measurement of a fix.** It is a corrected diagnosis
 and a testable hypothesis. No throughput claim changes until the sweep runs and the
 winning mode passes a real eval.
+
+
+---
+
+## 5.24 The published checkpoints do not load on a current stack
+
+*Found 2026-09-03 while trying to capture the eager reference for the §5.17a
+CUDA-graph sweep. This is a more serious usability problem than throughput, and it
+blocks the sweep entirely: a model that will not load has no tok/s.*
+
+### Symptom
+
+`vllm` engine init fails immediately on both published checkpoints:
+
+```
+rope_params = self.config.rope_parameters[layer_type]
+KeyError: 'hybrid'
+```
+
+Environment: vLLM 0.26.0 (`~/vllm-src` @ `568afb3a1`), transformers 5.15.1,
+torch 2.11.0+cu130. The published throughput and accuracy numbers were measured
+on **vLLM 0.20.2 / transformers 4.57.1**, where this did not occur.
+
+### Root cause, pinned to the line
+
+1. transformers 5.15.1 now ships **native** `models/zaya/` — it did not when this
+   project's numbers were measured.
+2. `configuration_zaya.py:96` defaults `layer_types = ["hybrid"] * num_hidden_layers`
+   when a config omits `layer_types`.
+3. `modeling_zaya.py` then indexes `config.rope_parameters[layer_type]`.
+4. Our `config.json` carries the **pre-refactor flat** form —
+   `{"partial_rotary_factor": 0.5, "rope_theta": 5000000, "rope_type": "default"}` —
+   with no `"hybrid"` key. KeyError.
+
+The thing §5.20 treats as a distinction — being the only quantization built from and
+verified against the pre-refactor 80-layer structure — is precisely what breaks it.
+Upstream moved to the refactored config shape; this checkpoint did not.
+
+### It is not fixable by editing the config
+
+Nesting `rope_parameters` under `"hybrid"` clears the KeyError and reaches weight
+loading, where it fails structurally:
+
+```
+ValueError: There is no module or parameter named 'final_norm'
+            in TransformersMoEForCausalLM
+```
+
+Diffing the checkpoint's `weight_map` against the instantiated model's parameters
+(`scripts/`-adjacent analysis, no GPU) gives 3,282 model parameters with no
+counterpart in the checkpoint:
+
+| this checkpoint (legacy) | current `zaya` expects | count |
+|---|---|---|
+| `layers.N.zaya_block.experts.local_experts.M.linear_fc1.*` | `layers.N.mlp.experts.routed_experts.w13_*` | 640 × 4 variants |
+| `…local_experts.M.linear_fc2.*` | `…routed_experts.w2_*` | 640 × 4 |
+| `layers.N.zaya_block.router.router_mlp.N.weight` | `layers.N.mlp.gate.router_mlp.fc1/fc2.{weight,bias}` | 120 |
+| `layers.N.input_norm.weight` | `layers.N.input_layernorm.weight` | 80 |
+| `layers.N.res_scale.hidden_states_{bias,scale}` | `layers.N.post_*_residual_scale.*` | 80 |
+
+The 640s decode as 40 MoE layers × 16 experts: upstream **batches all 16 experts
+into one stacked tensor** and **fuses `fc1` into `w13`**, where this checkpoint
+stores them per-expert and unfused. A remap would have to stack 16 NVFP4 *packed*
+tensors plus their FP8 block scales into batched tensors with a consistently
+re-stacked scale layout — the exact operation §5.9 documents failing silently
+(wrong global-scale convention produces pad-token collapse, not an error). Not
+worth hand-rolling.
+
+### Note: it runs through the Transformers fallback backend, not native vLLM
+
+The error names `TransformersMoEForCausalLM`, and there is no `zaya*.py` under
+`vllm/model_executor/models/`. So this model has always been served through vLLM's
+**generic Transformers backend**, which carries materially more per-step Python
+overhead than a native vLLM model implementation. That is very likely a large share
+of the §5.17a finding that decode runs at ~0.5% of the memory-bandwidth roofline.
+The two findings are the same story: this configuration is dominated by host-side
+per-step cost.
+
+### The fix is to re-quantize from the refactored base
+
+`Zyphra/ZAYA1-8B` (current, 40-layer) produces the modern layout natively. §5.20
+already established byte-identical `embed_tokens` between legacy and refactored, so
+nothing is lost in quality terms by switching base.
+
+**One blocker, found by inspection before spending GPU time.** The refactored base
+stores experts as batched parameters:
+
+```python
+class ZayaExperts(nn.Module):                       # modeling_zaya.py:576
+    self.gate_up_proj = nn.Parameter(...)           # [E, 2*I, H]
+    self.down_proj    = nn.Parameter(...)           # [E, H, I]
+    ...  nn.functional.linear(current_state, self.gate_up_proj[expert_idx])
+```
+
+They are **not `nn.Linear`**. A recipe with `targets: ["Linear"]` therefore does not
+see them. Applying the existing ignore list to the refactored base leaves only
+`o_proj` (40) and `mlp.gate.down_proj` (40) as targets — the entire MoE would stay
+BF16 and the run would produce a barely-compressed checkpoint **with no error
+raised**.
+
+llm-compressor already solves this generically: `llmcompressor/modeling/moe/`
+linearizes batched experts for the duration of quantization, driven by
+`ARCH_TO_IMPORT_PATHS` keyed on `model_type`. `zaya` is simply not registered.
+`ExpertMLPWithGate.copy_from_experts_module` (linear_experts.py:55-58) reads the
+non-transposed layout as `gate = gate_up_proj[i, :I]`, `up = gate_up_proj[i, I:]`,
+`down = down_proj[i]` — exactly Zaya's shapes — and `is_transposed` defaults to
+False (helpers.py:56; only Llama4 overrides it). So a registry entry suffices, with
+no new conversion class: `scripts/register_zaya_moe.py`.
+
+### Ignore-list drift on the refactored base
+
+Checked by name analysis, no GPU:
+
+- `re:.*cca.*` matches **nothing** — the CCA convs are now
+  `self_attn.qkv_proj.conv_qk_{depthwise,grouped}` and `v_proj_delayed`. They stay
+  excluded only because `re:.*qkv.*` happens to catch them, and they are `Conv1d`
+  rather than `Linear` regardless. Benign, but the pattern is dead and should be
+  replaced with one that names what it means.
+- `lm_head` still matches the `nn.Linear` at `modeling_zaya.py:803` even though the
+  refactored checkpoint ties embeddings and carries no `lm_head` tensor.
+- `re:.*router.*` (160 modules) and `re:.*norm.*` (121) still behave.
+
+### Status and what is not yet known
+
+- The registration is verified **by source inspection**, and
+  `scripts/register_zaya_moe.py` asserts the expert layout still matches. It has
+  **not** been run through an actual quantization.
+- Confirm with `quantize_zaya_ct_nvfp4.py --dry-run` before any full run: the dry
+  run must report expert Linears among the calibrated modules. If it reports ~80
+  modules, the linearizer did not engage and the run must not proceed.
+- The published accuracy figures were measured on the legacy artifact. A
+  re-quantized checkpoint is a **new artifact** and inherits none of them; the
+  paired HellaSwag comparison and the generative suite have to be re-run before any
+  number is reproduced on a card.
+- The §5.17a CUDA-graph sweep stays blocked until there is a checkpoint that loads.

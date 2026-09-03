@@ -38,6 +38,35 @@ distinction here — the distinction is doing it with compressed-tensors inside 
 16 GB **consumer** VRAM budget, with measured accuracy and throughput published.
 Everything here was built and debugged on a single RTX 5070 Ti.
 
+## Architecture
+
+```mermaid
+graph TD
+    Base["Zyphra/ZAYA1-8B-legacy<br/>80-layer MoE - reasoning - Apache-2.0"]
+
+    subgraph Build ["Quantization - RTX 5070 Ti, SM120"]
+        Cal["llm-compressor NVFP4 W4A4 calibration<br/>4-bit weights + 4-bit activations - layer-wise GPU"]
+        Fork{"keep outlier-sensitive<br/>Linears at BF16?"}
+    end
+
+    subgraph HF ["Published checkpoints (Hugging Face)"]
+        Mixed["zaya1-8b-nvfp4-w4a4 - 9.46 GB<br/>936 W4A4 + 384 BF16-exempt - eval control"]
+        Uni["zaya1-8b-nvfp4-w4a4-uniform - 6.02 GB<br/>1,320 W4A4 - 0 exemptions"]
+    end
+
+    subgraph Serve ["Serving & evaluation"]
+        vLLM["vLLM 0.20.2 (source) - native CUTLASS FP4 tensor-core kernels<br/>enforce_eager=True (CUDA graphs corrupt on SM120)"]
+        Bench["HumanEval 72.6% - GSM8K 65.5% - MMLU-Pro 48.1% (0-shot)<br/>9.5 tok/s single - ~74 tok/s batch-8"]
+    end
+
+    Base --> Cal --> Fork
+    Fork -- yes (384) --> Mixed
+    Fork -- no --> Uni
+    Mixed --> vLLM
+    Uni --> vLLM
+    vLLM --> Bench
+```
+
 ## Highlights
 
 | Result | Detail |

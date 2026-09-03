@@ -22,15 +22,45 @@ starting; the whole plan follows from them.
 Environments: `~/quant-env` (llmcompressor 0.13.0) for quantization,
 `~/vllm-env` (vLLM 0.26.0) for serving/eval. They are **separate** — do not mix.
 
-## Step 1 — dry-run the re-quantization (~10 min GPU) ← START HERE
+## Step 0 — rebuild the calibration data (~5-20 min, CPU + network, no GPU)
+
+`data/calibration/` is gitignored and the `.pt` was cleared at some point; only
+`manifest.json` survives. The dry run fails in 11 seconds without it:
+
+```
+ERROR Calibration data not found: data/calibration/calibration_data.pt.
+      Run scripts/build_calibration_data.py first.
+```
+
+The published checkpoints used the **8-source mix** recorded in
+`data/calibration/manifest.json` (math500 151, gsm8k 153, humaneval 38, mbpp 25,
+triviaqa 153, alpaca 153, writingprompts 153, glaive 153 = 979 samples, matching
+the "977 samples" on the card). That is the `--arc-mix` recipe:
 
 ```bash
 cd ~/zaya1-nvfp4-w4a4
-~/quant-env/bin/python -c "import sys; sys.path.insert(0,'scripts'); \
-  from register_zaya_moe import register; register()"   # sanity, should print nothing
-ZAYA_MODEL_ID=Zyphra/ZAYA1-8B ~/quant-env/bin/python scripts/quantize_zaya_ct_nvfp4.py \
-    --scheme w4a4 --dry-run
+ZAYA_MODEL_ID=Zyphra/ZAYA1-8B ~/quant-env/bin/python scripts/build_calibration_data.py --arc-mix
 ```
+
+Pass `--calibration-data <path>` to the quantizer if the output does not land at
+`data/calibration/calibration_data.pt`.
+
+## Step 1 — dry-run the re-quantization (~10 min GPU) ← THE GATE
+
+Registration is now wired into `quantize_zaya_ct_nvfp4.py` itself, immediately
+after `parse_args()`, so it lands in the same process as the pipeline. Do not rely
+on registering from a separate `python -c` invocation — that patches a different
+process and the MoE would silently stay BF16.
+
+```bash
+cd ~/zaya1-nvfp4-w4a4
+ZAYA_MODEL_ID=Zyphra/ZAYA1-8B ~/quant-env/bin/python scripts/quantize_zaya_ct_nvfp4.py \
+    --scheme w4a4 --dry-run \
+    --output-dir ~/models/zaya-refactored-w4a4-dryrun
+```
+
+Always pass an explicit `--output-dir`; the scheme default points at the directory
+the legacy build used.
 
 **The gate — read the module count.** The dry run must report **expert Linears**
 among the calibrated modules. If it reports roughly **80** modules, the linearizer

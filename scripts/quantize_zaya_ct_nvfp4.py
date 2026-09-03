@@ -1761,6 +1761,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Register `zaya` with llm-compressor's batched-MoE linearizer, in THIS
+    # process, before the pipeline builds. The refactored Zyphra/ZAYA1-8B
+    # stores experts as nn.Parameter (ZayaExperts, modeling_zaya.py:576), not
+    # nn.Linear, so targets:["Linear"] does not see them and the entire MoE
+    # would silently stay BF16 with no error raised. See RESEARCH.md 5.24.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from register_zaya_moe import register as _register_zaya_moe
+
+    _register_zaya_moe()
+
     # Pick a sensible default output_dir per scheme if user didn't override
     if args.output_dir is None:
         args.output_dir = DEFAULT_OUTPUT_W4A4 if args.scheme == "w4a4" else DEFAULT_OUTPUT

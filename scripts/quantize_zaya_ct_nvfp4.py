@@ -956,6 +956,20 @@ def calibrate_input_global_scales_layerwise(
                     gptq_skipped,
                 )
 
+        # Per-layer memory telemetry. The 2026-09-03 full run ran at ~26 s/layer
+        # through layer 30 and then collapsed to ~294 s/layer with the GPU pinned
+        # near capacity. Two hypotheses were checked and BOTH failed: host swap was
+        # untouched (684 KB), and align_modules does clear keep_onloaded_values on
+        # exit. Cause still unknown - so log the numbers rather than theorise.
+        if layer_idx % 5 == 0 or layer_idx >= max_layer - 3:
+            logger.info(
+                "  mem[layer %d]: cuda_alloc=%.2fGiB cuda_reserved=%.2fGiB host_rss=%.1fGiB",
+                layer_idx,
+                torch.cuda.memory_allocated() / 2**30,
+                torch.cuda.memory_reserved() / 2**30,
+                __import__("resource").getrusage(__import__("resource").RUSAGE_SELF).ru_maxrss / 2**20,
+            )
+
         layer.to("cpu")
         torch.cuda.empty_cache()
         gc.collect()

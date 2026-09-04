@@ -491,6 +491,28 @@ def _gptq_correction(
     return W_q
 
 
+from compressed_tensors.offload import align_modules
+
+
+class LinearizedExpertsWontMove(RuntimeError):
+    """Raised when linearized MoE experts cannot be moved onto the accelerator.
+
+    Measured 2026-09-03 on transformers 5.14.1 / llmcompressor 0.13.0: after
+    linearize_moe, the 48 expert weights per layer (16 experts x 3 projections)
+    stay on CPU through every documented move. `layer.to(dev)` skips them,
+    `param.data = param.data.to(dev)` does not stick, and rebinding
+    `setattr(mod, name, nn.Parameter(...))` is silently discarded - while the
+    ~28 other parameters in the same layer move normally, and
+    `param.data.to("cuda:0")` on its own returns a genuine cuda tensor. So the
+    move works; the assignment does not survive on these modules.
+
+    Root cause not established. Rather than guess at a workaround, the caller
+    falls back to running calibration entirely on CPU, which needs no moves at
+    all. That is the path this script's own docstring describes as the baseline
+    ("~30s per 1024-token sample ... acceptable for once-off Phase 1").
+    """
+
+
 def _call_rotary(rotary: Any, hidden: Any, position_ids: Any, layer_type: Any) -> Any:
     """Call a rotary embedding across the transformers 4.x / 5.x signature change.
 
@@ -514,6 +536,32 @@ def _call_rotary(rotary: Any, hidden: Any, position_ids: Any, layer_type: Any) -
     if "layer_type" in params:
         return rotary(hidden, position_ids, layer_type)
     return rotary(hidden, position_ids)
+
+
+def _calibrate_with_cpu_fallback(model, calibration_tensor, **kwargs):
+    """Run layer-wise calibration on the accelerator, falling back to CPU.
+
+    The GPU path shuttles one layer at a time onto the card, which is what makes
+    an 8B BF16 model calibrate inside 16 GB. When the linearized MoE experts
+    refuse to move (see LinearizedExpertsWontMove), that path cannot produce
+    correct activation scales, so fall back to calibrating on CPU rather than
+    silently measuring a half-moved layer.
+
+    CPU calibration is correct but slow - roughly 30 s per 1024-token sample -
+    so this warns loudly rather than hiding the cost.
+    """
+    try:
+        return calibrate_input_global_scales_layerwise(model, calibration_tensor, **kwargs)
+    except LinearizedExpertsWontMove as exc:
+        logger.warning("=" * 60)
+        logger.warning("GPU layer-wise calibration unavailable: %s", exc)
+        logger.warning(
+            "Falling back to CPU calibration. This is CORRECT but SLOW (~30 s per "
+            "1024-token sample). For a full run, budget hours, not minutes."
+        )
+        logger.warning("=" * 60)
+        kwargs["device"] = "cpu"
+        return calibrate_input_global_scales_layerwise(model, calibration_tensor, **kwargs)
 
 
 def calibrate_input_global_scales_layerwise(
@@ -749,9 +797,10 @@ def calibrate_input_global_scales_layerwise(
         swa_rotary.to("cpu")
     torch.cuda.empty_cache()
 
-    # Per-sample state: (hidden, residual, prev_router_hidden_states) — all CPU.
-    # `residual` and `prev_router_hidden_states` start as None for every sample.
-    residual_cpu: list[Any] = [None] * len(hidden_states_cpu)
+    # Per-sample state: (hidden, prev_router_hidden_states) — all CPU.
+    # `prev_router_hidden_states` starts as None for every sample. The refactored
+    # ZayaDecoderLayer keeps the residual stream internally, so it is no longer
+    # threaded through this loop.
     router_cpu: list[Any] = [None] * len(hidden_states_cpu)
 
     # ── Iterate layers ─────────────────────────────────────────
@@ -759,6 +808,27 @@ def calibrate_input_global_scales_layerwise(
     for layer_idx in range(max_layer):
         layer = layers[layer_idx]
         layer.to(dev)
+
+        # `layer.to(dev)` deliberately does not reach the linearized expert tensors.
+        #
+        # llm-compressor's LinearExperts2D.from_experts_module ends with
+        #
+        #     offload_kwargs = get_cache_init_kwargs(experts)
+        #     for module in self.modules():
+        #         offload_module(module, **offload_kwargs)
+        #
+        # so every expert submodule is placed under compressed-tensors offloading.
+        # Offloaded parameters are held in an OffloadCache and onloaded on access,
+        # which is why `.to()`, `param.data = param.data.to(dev)` and even rebinding
+        # via `setattr(mod, name, nn.Parameter(...))` all appear to succeed and then
+        # read back on CPU. Measured: 48 expert weights per layer (16 experts x 3
+        # projections) behave this way while the other ~28 parameters move normally.
+        #
+        # The supported way to run a forward over them is `align_modules`, which the
+        # compressed-tensors docs describe as "onloading modules to a device, and
+        # disabling onload and offload attempts triggered by forward calls. Used for
+        # sequential onloading of layers" - exactly this loop's access pattern.
+        # See the alignment context opened around the sample loop below.
 
         # Pick rotary embeddings (sliding-window vs full)
         if swa_position_embeddings is not None and swa_layers is not None:
@@ -773,41 +843,66 @@ def calibrate_input_global_scales_layerwise(
                 full_name = f"model.layers.{layer_idx}.{name}" if name else f"model.layers.{layer_idx}"
                 local_hooks.append(mod.register_forward_pre_hook(_make_pre_hook(full_name)))
 
-        # Forward each sample through this layer
-        with torch.no_grad():
+        # Forward each sample through this layer, with the offloaded expert
+        # parameters onloaded to `dev` for the duration.
+        with align_modules(list(layer.modules()), execution_device=torch.device(dev)), torch.no_grad():
+            # Verified inside the alignment context: outside it the offloaded
+            # experts legitimately read back as CPU, so checking there would be
+            # measuring the wrong thing. A stray tensor here would silently
+            # calibrate activation scales against a partially-onloaded layer.
+            _stray = [
+                n for n, pp in layer.named_parameters()
+                if pp.device.type != torch.device(dev).type
+            ] + [
+                n for n, bb in layer.named_buffers()
+                if bb.device.type != torch.device(dev).type
+            ]
+            if _stray:
+                raise LinearizedExpertsWontMove(
+                    f"layer {layer_idx}: {len(_stray)} tensors are not on {dev} even "
+                    f"inside align_modules (first few: {_stray[:5]})."
+                )
+
             for sample_idx in range(len(hidden_states_cpu)):
                 h = hidden_states_cpu[sample_idx].to(dev)
-                r = residual_cpu[sample_idx]
-                if r is not None:
-                    r = r.to(dev)
                 pr = router_cpu[sample_idx]
                 if pr is not None:
                     pr = pr.to(dev)
 
+                # Refactored ZayaDecoderLayer signature (transformers >=5):
+                #
+                #   forward(hidden_states, prev_router_hidden_states=None,
+                #           attention_mask=None, past_key_values=None,
+                #           position_embeddings=None, **kwargs)
+                #       -> (hidden_states, router_hidden_states_next)
+                #
+                # Two changes from the pre-refactor form this loop was written
+                # against: `residual` is gone - the layer keeps the residual stream
+                # internally - and the return is a 2-tuple, not (outputs, residual,
+                # router). The old call passed the residual POSITIONALLY into what
+                # is now the prev_router_hidden_states slot and then passed
+                # prev_router_hidden_states again by keyword, which is what produced
+                #   TypeError: ZayaDecoderLayer.forward() got multiple values for
+                #   argument 'prev_router_hidden_states'
+                # Extra kwargs (position_ids, cache_position, use_cache,
+                # output_attentions, cca_mask) are dropped; they are not in the
+                # signature and the rotary result is passed via position_embeddings.
                 try:
-                    layer_outputs, r_new, pr_new = layer(
+                    h_new, pr_new = layer(
                         h,
-                        r,
-                        attention_mask=None,
-                        position_ids=position_ids,
-                        past_key_values=None,
-                        output_attentions=False,
-                        use_cache=False,
-                        cache_position=cache_position,
-                        position_embeddings=emb_to_use,
                         prev_router_hidden_states=pr,
-                        cca_mask=None,
+                        attention_mask=None,
+                        past_key_values=None,
+                        position_embeddings=emb_to_use,
                     )
                 except torch.cuda.OutOfMemoryError as oom:
                     logger.error("OOM at layer %d sample %d: %s", layer_idx, sample_idx, oom)
                     raise
 
-                h_new = layer_outputs[0]
                 hidden_states_cpu[sample_idx] = h_new.detach().cpu()
-                residual_cpu[sample_idx] = r_new.detach().cpu() if r_new is not None else None
                 router_cpu[sample_idx] = pr_new.detach().cpu() if pr_new is not None else None
 
-                del h, r, pr, h_new, r_new, pr_new, layer_outputs
+                del h, pr, h_new, pr_new
 
         for hk in local_hooks:
             hk.remove()
@@ -1215,7 +1310,7 @@ def run_w4a4(args: Any) -> int:
     # (CCA attention requires CUDA). 8B BF16 doesn't fit in 16 GB VRAM as a
     # whole, so we move one decoder layer at a time on/off GPU.
     max_layer = DRY_RUN_LAYERS_W4A4 if args.dry_run else None
-    activation_max = calibrate_input_global_scales_layerwise(
+    activation_max = _calibrate_with_cpu_fallback(
         model=model,
         calibration_tensor=cal_tensor,
         batch_size=args.calibration_batch_size,

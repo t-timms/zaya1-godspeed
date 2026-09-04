@@ -224,3 +224,75 @@ otherwise.
 
 Steps 3-5 are unchanged and still correct once a loadable checkpoint exists. The
 CUDA-graph sweep remains blocked behind that.
+
+---
+
+## STEP 1 NOW PASSES — 2026-09-03, later. Step 2 is unblocked.
+
+Five separate transformers-5 / llm-compressor breaks had to be fixed first; all
+are committed. Dry run (4 layers, 8 samples) completes with `rc=0`:
+
+```
+Linearized MoE experts: nn.Linear count 361 -> 2281
+Restored plain Linear.forward on 2000 quantized Linears
+layer 4/4 done (3.1s elapsed, 146 hooks fired)
+Set input_global_scale on 200/200 Linears (54 repaired from uncalibrated)
+Compressed 200 Linear modules in 1s (skipped 0, BF16-exempted 0)
+Saved in 2s | Total: 1596 MB
+```
+
+**Corrected gate numbers.** The earlier "~1,300 vs ~80" figure was an estimate.
+The real numbers on this base:
+
+| Signal | Expected | Means |
+|---|---|---|
+| `nn.Linear count` after linearization | **361 -> 2281** | +1,920 = 40 layers x 16 experts x 3 |
+| `quantized Linears` | **2000** | 1,920 experts + 40 `o_proj` + 40 `mlp.gate.down_proj` |
+| per layer | **50** | 48 expert + `o_proj` + `gate.down_proj` |
+
+If linearization silently fails you get **80**, and the run now aborts on the
+Linear-count assertion rather than proceeding.
+
+### What was fixed to get here
+
+1. **Calibration data** - `apply_chat_template` returns a `BatchEncoding` on
+   transformers 5; `list(tokens)` was yielding dict KEYS, so each text
+   contributed 2 strings instead of ~300 ids (`59bc382`).
+2. **Rotary** - `forward(x, position_ids, layer_type)`; `layer_type` defaults to
+   None in 5.14, so omitting it failed as `'ZayaRotaryEmbedding' object has no
+   attribute 'None_inv_freq'` (`f34185c`).
+3. **Experts invisible** - `ZayaExperts` holds batched `nn.Parameter`, so
+   `targets: ["Linear"]` saw only 80 modules. Fixed by convert-after-load
+   `linearize_moe` (`cc44458`).
+4. **Decoder layer signature** - `residual` is gone and the return is a 2-tuple;
+   the old call passed the residual positionally into the
+   `prev_router_hidden_states` slot *and* again by keyword.
+5. **Offloaded experts** - `LinearExperts2D.from_experts_module` calls
+   `offload_module` on every expert, so `.to()` / `.data =` / rebinding all
+   silently fail. Must run the forward inside
+   `align_modules(list(layer.modules()), execution_device=dev)`.
+
+### Watch this on the full run
+
+`54/54 uncalibrated modules repaired` - **27% of the calibrated modules saw no
+activations at all** in the dry run. With top-1 routing over 16 experts and only
+8 samples, most experts are never selected, so this is expected *here*. On the
+full 826-sample run it should fall close to zero.
+
+**It is the number to check before trusting the output.** A module whose
+`input_global_scale` was "repaired" rather than measured has a fabricated
+activation scale, and W4A4 is exactly where that shows up as silent quality
+loss. If the full run still reports a large repaired count, the calibration set
+is not exercising the experts and the result should not be published.
+
+### Step 2, ready to run
+
+```bash
+cd ~/zaya1-nvfp4-w4a4
+ZAYA_MODEL_ID=Zyphra/ZAYA1-8B ~/quant-env/bin/python scripts/quantize_zaya_ct_nvfp4.py \
+    --scheme w4a4 --output-dir ~/models/zaya-refactored-w4a4
+```
+
+Dry run was ~40 s of compute after a ~4 min load. The full run is 40 layers and
+826 samples rather than 4 and 8, so budget hours and run it detached under tmux.
+Steps 3-5 (load check, CUDA-graph sweep, re-eval) are unchanged.

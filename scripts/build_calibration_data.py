@@ -114,7 +114,7 @@ DATASET_PATHS: dict[str, str] = {
     "sharegpt": "anon8231489123/ShareGPT_Vicuna_unfiltered",
     "aime": "Maxwell-Jia/AIME_2024",
     "gsm8k": "openai/gsm8k",  # subset 'main', split 'train' (~7.5K problems)
-    "triviaqa": "trivia_qa",  # subset 'rc.nocontext', split 'train'
+    "triviaqa": "mandarjoshi/trivia_qa",  # subset 'rc.nocontext', split 'train'
     "alpaca": "yahma/alpaca-cleaned",  # split 'train'
     "writingprompts": "euclaise/writingprompts",  # split 'train' (subsample heavily — 1.4M total)
     "glaive": "glaiveai/glaive-function-calling-v2",  # split 'train'

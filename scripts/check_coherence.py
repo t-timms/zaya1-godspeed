@@ -61,7 +61,11 @@ def garbage_checks(text: str) -> list[str]:
     """Absolute failure conditions, independent of the reference."""
     tripped = []
     if not text.strip():
-        tripped.append("empty output")
+        # Deliberately vague on cause: empty text can mean an immediate stop OR a
+        # full budget of pad tokens. The per-prompt [gate] line printed by
+        # generate() carries finish_reason and token-id counts, which is what
+        # actually distinguishes them. Do not guess here.
+        tripped.append("empty output (check the [gate] line for finish_reason)")
         return tripped
 
     printable = sum(1 for c in text if c.isprintable() or c in "\n\t")
@@ -101,7 +105,24 @@ def generate(model: str, mode: str, gpu_mem: float, max_tokens: int) -> list[str
     llm = LLM(**kwargs)
     params = SamplingParams(temperature=0.0, max_tokens=max_tokens, seed=0)
     outs = llm.generate(PROMPTS, params)
-    # llm.generate preserves input order, but key on the prompt anyway.
+
+    # Report the DISCRIMINATING detail, not just the decoded text. Empty text is
+    # ambiguous: finish_reason="stop" with no text means the model chose to stop,
+    # while finish_reason="length" with no text means it emitted a full budget of
+    # tokens that decode to nothing - i.e. pad-token collapse, the signature of a
+    # wrong NVFP4 global-scale convention (RESEARCH.md 5.9). Those have opposite
+    # causes, and a gate that prints only the text invites the wrong story.
+    for o in outs:
+        gen = o.outputs[0]
+        ids = list(gen.token_ids)
+        uniq = set(ids)
+        collapsed = len(uniq) == 1 and len(ids) > 4
+        print(
+            f"  [gate] n_tok={len(ids):>4} finish={gen.finish_reason!r:>10} "
+            f"distinct_ids={len(uniq):>4} text_len={len(gen.text):>5}"
+            + (f"  <-- SINGLE-TOKEN COLLAPSE (id={ids[0]})" if collapsed else "")
+        )
+
     by_prompt = {o.prompt: o.outputs[0].text for o in outs}
     return [by_prompt[p] for p in PROMPTS]
 

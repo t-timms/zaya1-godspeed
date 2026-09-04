@@ -2032,10 +2032,30 @@ def main() -> int:
     t0 = time.time()
     model = transformers.AutoModelForCausalLM.from_pretrained(
         args.model_id,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="cpu",
         trust_remote_code=True,
     )
+
+    # Linearize the MoE experts here too. This path is weight-only, so it needs
+    # none of the activation-calibration machinery, but it shares the one failure
+    # that matters: ZayaExperts stores experts as batched nn.Parameter, and
+    # apply_quantization_config walks nn.Linear MODULES. Without this, W4A16 would
+    # quantize 80 Linears instead of 2000 and leave the entire MoE in BF16 with no
+    # error raised - producing a barely-compressed checkpoint that looks fine.
+    # Same bug as RESEARCH.md 5.24, different code path.
+    from llmcompressor.modeling.moe.linearize import linearize_moe
+
+    _pre = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
+    linearize_moe(model)
+    _post = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
+    logger.info("Linearized MoE experts: nn.Linear count %d -> %d", _pre, _post)
+    if _post <= _pre:
+        raise RuntimeError(
+            f"linearize_moe did not expand the Linear count ({_pre} -> {_post}); "
+            "the experts are still batched nn.Parameter and would be left in BF16. "
+            "See RESEARCH.md 5.24 before proceeding."
+        )
     logger.info(
         "Model loaded in %.0fs | Params: %.1fB", time.time() - t0, sum(p.numel() for p in model.parameters()) / 1e9
     )

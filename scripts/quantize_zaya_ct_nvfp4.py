@@ -945,7 +945,12 @@ def calibrate_input_global_scales_layerwise(
                     continue
                 W = mod.weight.data.float()  # [out, in] on GPU
                 W_corrected = _gptq_correction(W, H_hess, group_size=GROUP_SIZE)
-                mod.weight.data = W_corrected.to(mod.weight.dtype)
+                # Offload-safe: a plain `.data =` here is silently dropped on the
+                # offloaded expert modules, which would discard the entire GPTQ
+                # correction while still reporting it as applied.
+                update_offload_parameter(
+                    mod, "weight", W_corrected.to(mod.weight.dtype)
+                )
                 del H_hess, W, W_corrected
                 gptq_applied += 1
             if gptq_applied > 0:
@@ -2188,7 +2193,11 @@ def main() -> int:
         fp4_max = 6.0
         scales = w_max / fp4_max
         scales = torch.clamp(scales, min=1e-12)
-        module.weight_scale.data = scales.to(torch.bfloat16)
+        # Offload-safe write - see the long note on the w4a4 path. The experts
+        # are offloaded here too (linearize_moe runs on this path as well), so a
+        # `.data =` assignment would be silently discarded and produce all-zero
+        # expert scales exactly as it did for w4a4.
+        update_offload_parameter(module, "weight_scale", scales.to(torch.bfloat16))
         calibrated += 1
     logger.info("Calibrated %d modules", calibrated)
 

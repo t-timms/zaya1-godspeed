@@ -1321,8 +1321,13 @@ def run_w4a4(args: Any) -> int:
     logger.info("Calibration shape: %s, dtype: %s", list(cal_tensor.shape), cal_tensor.dtype)
 
     if args.dry_run:
-        # Keep the calibration cheap during dry-run
-        cal_tensor = cal_tensor[: min(8, cal_tensor.shape[0])]
+        # Keep the calibration cheap during dry-run, but honour an explicit
+        # --calibration-num-samples so the dry run can be used to separate the
+        # fixed per-layer cost from the per-sample cost when estimating a full
+        # run. Two points at different sample counts give a defensible ETA;
+        # one point does not.
+        _dry_n = args.calibration_num_samples or 8
+        cal_tensor = cal_tensor[: min(_dry_n, cal_tensor.shape[0])]
         logger.info("DRY RUN: truncated calibration to %d samples", cal_tensor.shape[0])
 
     # Layer-wise GPU calibration — full-model CPU forward crashes for Zaya

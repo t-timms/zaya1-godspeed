@@ -491,7 +491,7 @@ def _gptq_correction(
     return W_q
 
 
-from compressed_tensors.offload import align_modules
+from compressed_tensors.offload import align_modules, update_offload_parameter
 from llmcompressor.modeling.moe.context import moe_calibration_context
 
 
@@ -1495,10 +1495,54 @@ def run_w4a4(args: Any) -> int:
         w_max = w_groups.abs().amax(dim=-1)
         scales = w_max / FP4_E2M1_MAX
         scales = torch.clamp(scales, min=1e-12)
-        module.weight_scale.data = scales.to(torch.bfloat16)
+        # Write through the offload API, NOT `.data =`.
+        #
+        # linearize_moe offloads every expert submodule (offload_module is called
+        # on all of them), so their parameters live in a compressed-tensors
+        # OffloadCache and are onloaded ON ACCESS. `module.weight_scale.data = x`
+        # therefore mutates a temporary onloaded COPY and is silently discarded,
+        # leaving the checkpoint's expert weight_scale as uninitialised memory.
+        #
+        # Measured on the 2026-09-03 build: experts had weight_scale all zeros
+        # (262144/262144) and weight_global_scale values like 1.2e-41 and -1.6e33,
+        # while non-offloaded modules (o_proj, mlp.gate.down_proj) were correct.
+        # Dequantising FP4 weights against zero scales yields identically zero
+        # output -> zero logits -> argmax picks token 0 -> pure <pad> generation.
+        # RESEARCH.md 5.9 and 424 describe the same signature.
+        #
+        # Note `input_global_scale` was unaffected: it is assigned as a NEW
+        # parameter, which inserts into the cache correctly. Only mutation of an
+        # EXISTING offloaded parameter is lost. That distinction is the whole bug.
+        update_offload_parameter(module, "weight_scale", scales.to(torch.bfloat16))
         calibrated_w += 1
 
     logger.info("Calibrated %d weight scales (%d layers skipped by dry-run)", calibrated_w, len(skipped_layers))
+
+    # Read the scales back and prove they persisted. A silently-dropped write
+    # here is invisible until generation collapses to pad tokens, which costs a
+    # full quantize + serve cycle to discover.
+    _bad_scale = []
+    for name, module in model.named_modules():
+        qscheme = getattr(module, "quantization_scheme", None)
+        if qscheme is None or qscheme.weights is None:
+            continue
+        if args.dry_run and name in skipped_layers:
+            continue
+        ws = getattr(module, "weight_scale", None)
+        if ws is None:
+            continue
+        wsf = ws.data.float()
+        if not torch.isfinite(wsf).all() or (wsf == 0).all():
+            _bad_scale.append(name)
+    if _bad_scale:
+        raise RuntimeError(
+            f"{len(_bad_scale)} modules have all-zero or non-finite weight_scale "
+            f"after calibration (e.g. {_bad_scale[:3]}). The write did not persist "
+            "- these are offloaded modules and the scale must be written with "
+            "update_offload_parameter. Quantizing now would produce a checkpoint "
+            "that loads and emits only pad tokens."
+        )
+    logger.info("Verified weight_scale persisted on %d modules", calibrated_w)
 
     # ── Compress each quantized module ──────────────────────
     compressed_params: dict[str, dict[str, torch.Tensor]] = {}

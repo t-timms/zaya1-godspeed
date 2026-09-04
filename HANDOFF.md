@@ -272,18 +272,36 @@ Linear-count assertion rather than proceeding.
    silently fail. Must run the forward inside
    `align_modules(list(layer.modules()), execution_device=dev)`.
 
-### Watch this on the full run
+### Expert calibration coverage — FIXED, not a caveat
 
-`54/54 uncalibrated modules repaired` - **27% of the calibrated modules saw no
-activations at all** in the dry run. With top-1 routing over 16 experts and only
-8 samples, most experts are never selected, so this is expected *here*. On the
-full 826-sample run it should fall close to zero.
+An earlier version of this file told you to "watch" that the dry run repaired
+54/54 uncalibrated modules (27%), calling it expected with 8 samples and top-1
+routing. **That was wrong on both counts and has been fixed.**
 
-**It is the number to check before trusting the output.** A module whose
-`input_global_scale` was "repaired" rather than measured has a fabricated
-activation scale, and W4A4 is exactly where that shows up as silent quality
-loss. If the full run still reports a large repaired count, the calibration set
-is not exercising the experts and the result should not be published.
+It was not arithmetically expected: 8 samples x 1024 tokens averages ~512 tokens
+per expert across 16 experts. And llm-compressor ships the solution -
+`moe_calibration_context()`, which flips `LinearExperts2D.forward` to run
+`expert(hidden_states)` for *every* expert and subset the output afterwards, so
+no expert goes unobserved regardless of what the router does. The calibration
+loop now runs inside it.
+
+Measured effect on the 4-layer dry run:
+
+| | before | after |
+|---|---:|---:|
+| hooks fired | 146 / 200 | **200 / 200** |
+| repaired from uncalibrated | **54** | **0** |
+| calibration wall time | 3.1 s | 4.7 s |
+
+Every `input_global_scale` is now measured rather than fabricated. The cost is
+sub-2x here, well under the ~16x (num_experts) worst case, because expert compute
+is not the dominant term at this scale.
+
+**Still worth confirming on the full run:** the log must say
+`0 repaired from uncalibrated`. Any non-zero count means some expert still saw no
+activations and its scale was invented - and W4A4 activation scales are exactly
+where an invented number becomes silent quality loss. Do not publish a checkpoint
+whose calibration log shows repairs.
 
 ### Step 2, ready to run
 

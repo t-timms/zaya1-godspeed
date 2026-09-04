@@ -492,6 +492,7 @@ def _gptq_correction(
 
 
 from compressed_tensors.offload import align_modules
+from llmcompressor.modeling.moe.context import moe_calibration_context
 
 
 class LinearizedExpertsWontMove(RuntimeError):
@@ -843,9 +844,27 @@ def calibrate_input_global_scales_layerwise(
                 full_name = f"model.layers.{layer_idx}.{name}" if name else f"model.layers.{layer_idx}"
                 local_hooks.append(mod.register_forward_pre_hook(_make_pre_hook(full_name)))
 
-        # Forward each sample through this layer, with the offloaded expert
-        # parameters onloaded to `dev` for the duration.
-        with align_modules(list(layer.modules()), execution_device=torch.device(dev)), torch.no_grad():
+        # Forward each sample through this layer, with (a) the offloaded expert
+        # parameters onloaded to `dev` and (b) every expert receiving every token.
+        #
+        # Without moe_calibration_context, LinearExperts2D.forward routes each token
+        # only to its top-1 expert, so any expert the router never selects during
+        # calibration gets NO activation observations and its input_global_scale has
+        # to be fabricated by the repair path. Measured on the 4-layer dry run:
+        # only 146 of 200 modules fired and 54 were "repaired" - a fabricated
+        # activation scale on 27% of the modules, which is precisely where W4A4
+        # turns into silent quality loss.
+        #
+        # The context flips LinearExperts2D.forward to `expert(hidden_states)` for
+        # every expert and then subsets the output, which the llm-compressor docs
+        # describe as guaranteeing that all experts receive data during calibration
+        # forward passes. It costs ~16x the expert FLOPs here (num_experts), and
+        # that is the intended trade: calibration is once, wrong scales are forever.
+        with (
+            moe_calibration_context(),
+            align_modules(list(layer.modules()), execution_device=torch.device(dev)),
+            torch.no_grad(),
+        ):
             # Verified inside the alignment context: outside it the offloaded
             # experts legitimately read back as CPU, so checking there would be
             # measuring the wrong thing. A stray tensor here would silently

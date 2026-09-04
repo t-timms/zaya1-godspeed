@@ -85,12 +85,28 @@ GLOBAL_SCALE_NUM = FP8_E4M3_MAX * FP4_E2M1_MAX  # 2688.0
 # `qkv` attribute that ZayaAttention uses for its CCA submodule (paths look
 # like `model.layers.0.self_attn.qkv.linear_q`). The earlier `re:.*cca.*`
 # matched nothing and silently quantized 160 CCA projections to W4A4.
+# Ignore list for the REFACTORED ZAYA1 architecture (Zyphra/ZAYA1-8B, 40 layers).
+# Re-derived 2026-09-04; the previous list used legacy 80-layer paths that no
+# longer exist. Cross-checked against switzerchees/ZAYA1-8B-NVFP4, a working
+# ModelOpt NVFP4 W4A4 build of this model, whose manifest excludes
+# ["*lm_head*", "*embed_tokens*", "*router*", "*conv_qk*"].
 W4A4_IGNORE_PATTERNS = [
-    "lm_head",  # tied to embed_tokens, BF16
-    "re:.*router.*",  # MoE router (size_n=17, doesn't fit FP4 grid cleanly)
-    "re:.*norm.*",  # RMSNorm
-    "re:.*qkv.*",  # named_modules path: model.layers.X.self_attn.qkv.linear_q
-    "re:.*cca.*",  # construct-time prefix path: model.layers.X.self_attn.cca.linear_q
+    "lm_head",  # tied to embed_tokens
+    "re:.*embed_tokens.*",  # tied embeddings; nn.Embedding, but be explicit
+    # The ENTIRE router. `self.gate = ZayaRouter(...)` (modeling_zaya.py:623), so
+    # mlp.gate.{down_proj,router_mlp.*,balancing_biases,router_states_scale} are
+    # all router. The old "re:.*router.*" matched only router_mlp.*, leaving
+    # mlp.gate.down_proj quantized in every layer. Router logits are fragile
+    # under quantization: a small perturbation flips top-k selection, and with
+    # top-1 routing over 16 experts there is no second choice to absorb it.
+    r"re:.*\.mlp\.gate\..*",
+    "re:.*norm.*",  # RMSNorm, qk_norm, router_mlp.norm
+    # CCA depthwise/grouped convs, now under qkv_proj. Conv1d, so also excluded by
+    # targets:["Linear"], but named explicitly rather than caught by accident.
+    "re:.*conv_qk.*",
+    # NOTE: deliberately NOT excluding qkv_proj. The old "re:.*qkv.*" swallowed
+    # q_proj/k_proj/v_proj_current/v_proj_delayed - 160 Linears the reference
+    # build quantizes. Excluding them costs compression and gains nothing.
 ]
 
 # Default threshold for dynamic mixed-precision exemption. MoE layers where any
@@ -124,7 +140,7 @@ def calibrate_input_global_scales(
     log_every: int = 20,
 ) -> dict[str, float]:
     """Run forward hooks to observe max |activation| per quantized Linear, then
-    set input_global_scale = max_act / FP4_E2M1_MAX on each module.
+    set input_global_scale = GLOBAL_SCALE_NUM / max_act on each module.
 
     Returns the raw max-activation dict for diagnostics. Model must have
     quantization_scheme attached to each target Linear (run apply_quantization_config
@@ -599,7 +615,7 @@ def calibrate_input_global_scales_layerwise(
          c. For each cached sample state (hidden, residual, router), move to
             GPU, run layer forward, cache new state to CPU
          d. Remove hooks, move layer back to CPU, free VRAM
-      3. Compute ``input_global_scale = max_act / FP4_E2M1_MAX`` per Linear
+      3. Compute ``input_global_scale = GLOBAL_SCALE_NUM / max_act`` per Linear
          and attach as a ``torch.nn.Parameter``.
 
     Model must already be on CPU with ``quantization_scheme`` attached to each

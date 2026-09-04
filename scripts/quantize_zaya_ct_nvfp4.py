@@ -46,6 +46,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import json
 import logging
@@ -860,8 +861,17 @@ def calibrate_input_global_scales_layerwise(
         # describe as guaranteeing that all experts receive data during calibration
         # forward passes. It costs ~16x the expert FLOPs here (num_experts), and
         # that is the intended trade: calibration is once, wrong scales are forever.
+        # ZAYA_NO_ALL_EXPERTS=1 disables all-expert calibration, for A/B-ing its
+        # effect on activation scales. moe_calibration_context is right for weight
+        # coverage but measures input_global_scale over tokens the expert never
+        # routes at inference, which can inflate the activation scale.
+        _all_experts_ctx = (
+            contextlib.nullcontext()
+            if os.environ.get("ZAYA_NO_ALL_EXPERTS")
+            else moe_calibration_context()
+        )
         with (
-            moe_calibration_context(),
+            _all_experts_ctx,
             align_modules(list(layer.modules()), execution_device=torch.device(dev)),
             torch.no_grad(),
         ):
@@ -1138,13 +1148,41 @@ def _apply_weight_global_scale_convention(
 
     Returns the number of modules patched.
     """
+    # Pre-pass: vLLM fuses each expert's gate_proj (w1) and up_proj (w3) into one
+    # w13 tensor carrying a SINGLE global scale, and warns when the checkpoint
+    # supplies two ("w1_weight_global_scale must match w3_weight_global_scale.
+    # Accuracy may be affected."). Computing the convention per module gave
+    # gate=6371.56 vs up=8822.15 on the rebuilt checkpoint - a 1.38x mismatch, so
+    # one half of every fused w13 dequantised against the wrong scale.
+    #
+    # Take max_abs over the PAIR so both halves share one global scale. The half
+    # with the smaller range loses a little resolution; that is inherent to a
+    # fused w13 and is what the format requires.
+    shared_max_abs: dict[str, float] = {}
+    for name, comp in compressed_params.items():
+        if not (name.endswith(".gate_proj") or name.endswith(".up_proj")):
+            continue
+        ws = comp.get("weight_scale")
+        if ws is None:
+            continue
+        prefix = name.rsplit(".", 1)[0]
+        m = FP4_E2M1_MAX * ws.float().abs().max().item()
+        if m > shared_max_abs.get(prefix, 0.0):
+            shared_max_abs[prefix] = m
+
+    unified = 0
     patched = 0
-    for comp in compressed_params.values():
+    for name, comp in compressed_params.items():
         ws = comp.get("weight_scale")
         if ws is None:
             continue
         ws_f32 = ws.float()
         max_abs_w = FP4_E2M1_MAX * ws_f32.abs().max().item()
+        if name.endswith(".gate_proj") or name.endswith(".up_proj"):
+            pair_max = shared_max_abs.get(name.rsplit(".", 1)[0], 0.0)
+            if pair_max > 0 and pair_max != max_abs_w:
+                unified += 1
+            max_abs_w = max(max_abs_w, pair_max)
         if max_abs_w <= 0:
             continue
         wgs = GLOBAL_SCALE_NUM / max_abs_w

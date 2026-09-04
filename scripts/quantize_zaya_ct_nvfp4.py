@@ -491,6 +491,31 @@ def _gptq_correction(
     return W_q
 
 
+def _call_rotary(rotary: Any, hidden: Any, position_ids: Any, layer_type: Any) -> Any:
+    """Call a rotary embedding across the transformers 4.x / 5.x signature change.
+
+    transformers >=5 keys the rotary buffers by layer type:
+    ``ZayaRotaryEmbedding.forward(x, position_ids, layer_type)`` looks up
+    ``f"{layer_type}_inv_freq"``. In 5.14 ``layer_type`` still defaults to None,
+    so omitting it does not raise TypeError - it fails later and less obviously
+    as::
+
+        AttributeError: 'ZayaRotaryEmbedding' object has no attribute 'None_inv_freq'
+
+    Older transformers take ``(x, position_ids)`` only. Inspect rather than
+    pin a version, so this keeps working either way.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(rotary.forward).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "layer_type" in params:
+        return rotary(hidden, position_ids, layer_type)
+    return rotary(hidden, position_ids)
+
+
 def calibrate_input_global_scales_layerwise(
     model: Any,
     calibration_tensor: Any,
@@ -681,8 +706,40 @@ def calibrate_input_global_scales_layerwise(
         dummy_h = hidden_states_cpu[0].to(dev)
         cache_position = torch.arange(seq_len, device=dev)
         position_ids = cache_position.unsqueeze(0)
-        position_embeddings = rotary(dummy_h, position_ids) if rotary is not None else None
-        swa_position_embeddings = swa_rotary(dummy_h, position_ids) if swa_rotary is not None else None
+        # This routine computes the rotary output ONCE and shares it across every
+        # layer. That is only valid while all layers have the same type - assert
+        # it rather than silently sharing the wrong frequencies.
+        _layer_types = list(getattr(model.config, "layer_types", None) or [])
+        _unique_types = sorted(set(_layer_types))
+        if len(_unique_types) > 1:
+            raise NotImplementedError(
+                f"config.layer_types contains multiple types {_unique_types}; this "
+                "routine shares one rotary result across all layers, which is only "
+                "correct for a single type. Compute per-type before proceeding."
+            )
+        _rope_layer_type = _unique_types[0] if _unique_types else None
+        _rope_params = getattr(model.config, "rope_parameters", None) or {}
+        _swa_layer_type = next(
+            (t for t in _rope_params if "sliding" in str(t)), None
+        )
+        logger.info(
+            "Rotary layer_type=%r (%d layers, %d distinct); swa layer_type=%r",
+            _rope_layer_type,
+            len(_layer_types),
+            len(_unique_types),
+            _swa_layer_type,
+        )
+
+        position_embeddings = (
+            _call_rotary(rotary, dummy_h, position_ids, _rope_layer_type)
+            if rotary is not None
+            else None
+        )
+        swa_position_embeddings = (
+            _call_rotary(swa_rotary, dummy_h, position_ids, _swa_layer_type)
+            if swa_rotary is not None
+            else None
+        )
         del dummy_h
 
     embed.to("cpu")

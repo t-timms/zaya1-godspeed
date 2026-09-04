@@ -1105,12 +1105,49 @@ def run_w4a4(args: Any) -> int:
     # is a future optimization (load+forward+free one layer at a time).
     logger.info("Loading model on CPU (no device_map — avoids compressed_tensors conflict)...")
     t0 = time.time()
+
+    # Load with the MoE experts LINEARIZED.
+    #
+    # The refactored Zyphra/ZAYA1-8B stores experts as batched nn.Parameter on
+    # ZayaExperts ([E, 2I, H] and [E, H, I]), applied via F.linear. Since
+    # apply_quantization_config walks nn.Linear MODULES, it cannot see them: without
+    # this, only 80 Linears (40 o_proj + 40 mlp.gate.down_proj) get quantized and the
+    # entire MoE silently stays BF16, with no error raised. See RESEARCH.md 5.24.
+    #
+    # load_quantizable_moe patches from_pretrained to swap ZayaExperts for a
+    # LinearExperts2D ModuleList of per-expert gate_proj/up_proj/down_proj Linears,
+    # driven by the registry entries in scripts/register_zaya_moe.py.
+    #
+    # The checkpoint then SAVES in per-expert 2D form, and that is correct - it is
+    # what vLLM's FusedMoE loader expects. RoutedExperts.build_expert_params_mapping()
+    # maps checkpoint keys `experts.{i}.{gate_proj,up_proj,down_proj}.*` into the
+    # fused w13/w2 parameters at load time. No re-fusing step is needed; the
+    # `routed_experts.w13_*` names are vLLM's internal parameters, not checkpoint keys.
+    from llmcompressor.modeling.moe.linearize import linearize_moe
+
     model = transformers.AutoModelForCausalLM.from_pretrained(
         args.model_id,
         dtype=torch.bfloat16,
         device_map="cpu",
         trust_remote_code=True,
     )
+
+    # Convert-after-load: the batched weights are loaded correctly first, then each
+    # ZayaExperts is replaced by a ModuleList of per-expert gate_proj/up_proj/
+    # down_proj Linears with the weights COPIED across
+    # (LinearExperts2D.from_experts_module). Slower than a mapping-based load
+    # (2D->3D->2D) but correct; the mapping path needs converters that split the
+    # batched tensors, which do not exist for zaya.
+    _pre = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
+    linearize_moe(model)
+    _post = sum(1 for m in model.modules() if isinstance(m, torch.nn.Linear))
+    logger.info("Linearized MoE experts: nn.Linear count %d -> %d", _pre, _post)
+    if _post <= _pre:
+        raise RuntimeError(
+            f"linearize_moe did not expand the Linear count ({_pre} -> {_post}); "
+            "the experts are still batched nn.Parameter and would be left in BF16. "
+            "See RESEARCH.md 5.24 before proceeding."
+        )
     logger.info(
         "Model loaded in %.0fs | Params: %.1fB", time.time() - t0, sum(p.numel() for p in model.parameters()) / 1e9
     )

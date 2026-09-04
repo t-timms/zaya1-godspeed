@@ -82,74 +82,25 @@ def register(strict: bool = True) -> bool:
 
     registry.setdefault("zaya", (CONFIG_PATH, EXPERTS_PATH))
 
-    # Second registry, and the one that actually gates linearization:
-    # has_linearize_load_mappings() requires the model_type in BOTH
-    # ARCH_TO_IMPORT_PATHS and ARCH_TO_2D_MAPPINGS. The latter describes the
-    # 3D-batched -> 2D-per-expert weight transforms, and its inverse is what
-    # transformers applies on save (core_model_loading.revert_weight_conversion),
-    # so the written checkpoint keeps the modern batched layout rather than
-    # re-creating the per-expert layout that made the published checkpoints
-    # unloadable in the first place (RESEARCH.md 5.24).
+    # NOTE: deliberately NOT registering ARCH_TO_2D_MAPPINGS.
     #
-    # Zaya's module paths are `model.layers.N.mlp.experts.{gate_up_proj,down_proj}`
-    # - identical to the `qwen2_moe` and `hy_v3` entries, so the transforms are
-    # the same shape.
-    mappings_2d = getattr(cm, "ARCH_TO_2D_MAPPINGS", None)
-    if mappings_2d is None:
-        if strict:
-            raise RuntimeError(
-                "llmcompressor.modeling.moe.conversion_mappings.ARCH_TO_2D_MAPPINGS "
-                "is gone - the linearization contract changed, re-verify before "
-                "quantizing"
-            )
-        return False
-
-    if "zaya" not in mappings_2d:
-        from transformers.core_model_loading import WeightRenaming
-
-        mappings_2d["zaya"] = (
-            ["mlp.experts.gate_up_proj", "mlp.experts.down_proj"],
-            [
-                WeightRenaming(
-                    source_patterns=r"^layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.",
-                    target_patterns=r"layers.\1.mlp.experts.\2.gate_proj.",
-                ),
-                WeightRenaming(
-                    source_patterns=r"^layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.",
-                    target_patterns=r"layers.\1.mlp.experts.\2.up_proj.",
-                ),
-                WeightRenaming(
-                    source_patterns=r"^layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.",
-                    target_patterns=r"layers.\1.mlp.experts.\2.down_proj.",
-                ),
-            ],
-        )
-
-    # Third piece: llm-compressor calls transformers'
-    # get_checkpoint_conversion_mapping(model_type) and iterates the result.
-    # transformers has no checkpoint conversions registered for `zaya`, so it
-    # returns None and get_linearize_load_mappings() dies with
-    # "TypeError: 'NoneType' object is not iterable". Register an EMPTY mapping:
-    # zaya genuinely needs no conversions beyond the 3D->2D ones above, and an
-    # empty list is the difference between "no conversions" and "unknown model".
-    try:
-        from transformers.conversion_mapping import (
-            get_checkpoint_conversion_mapping,
-            register_checkpoint_conversion_mapping,
-        )
-    except ImportError:
-        if strict:
-            raise
-        return False
-
-    if get_checkpoint_conversion_mapping("zaya") is None:
-        register_checkpoint_conversion_mapping("zaya", [])
-
-    return (
-        "zaya" in registry
-        and "zaya" in mappings_2d
-        and get_checkpoint_conversion_mapping("zaya") is not None
-    )
+    # An earlier version did, copying qwen2_moe's entry. That entry is an IDENTITY
+    # rename - it assumes the checkpoint already stores per-expert keys like
+    # `experts.3.gate_proj.weight`. Zaya's checkpoint stores BATCHED tensors
+    # (`experts.gate_up_proj`), so registering it sent loading down the
+    # mapping-based path, which linearized the modules and then loaded nothing
+    # into them: MISSING/UNEXPECTED across all 40 layers, and 2,000 Linears
+    # quantized from uninitialised weights. Silent corruption, worse than the
+    # original failure.
+    #
+    # Use the convert-after-load pathway instead: load normally so the batched
+    # weights land correctly, then call llmcompressor.modeling.moe.linearize
+    # .linearize_moe(model), which copies each expert across via
+    # LinearExperts2D.from_experts_module. ZayaExperts already carries the
+    # `use_experts_implementation` args that path needs -
+    # {'is_concatenated': True, 'is_transposed': False, 'has_bias': False,
+    #  'has_gate': True} - so no custom LinearExperts2D subclass is required.
+    return "zaya" in registry
 
 
 def verify_expert_layout() -> None:

@@ -1,18 +1,18 @@
 {
   "version": "3.0.0",
-  "created": "2026-09-03T19:15:56Z",
+  "created": "2026-09-04T00:59:09Z",
   "model": "Zyphra/ZAYA1-8B-legacy",
   "purpose": "NVFP4 W4A4 calibration data \u2014 input_global_scale per fused Linear",
   "mix_profile": "phase1",
   "packing_mode": "concat-pack-with-eos-separator",
-  "total_samples": 826,
+  "total_samples": 979,
   "max_length": 1024,
   "shape": [
-    826,
+    979,
     1024
   ],
   "dtype": "torch.int64",
-  "pad_ratio": 6.857218523002421e-05,
+  "pad_ratio": 5.78555924412666e-05,
   "source_weights": {
     "math500": 0.15,
     "gsm8k": 0.15,
@@ -28,6 +28,7 @@
     "gsm8k": 153,
     "humaneval": 38,
     "mbpp": 25,
+    "triviaqa": 153,
     "alpaca": 153,
     "writingprompts": 153,
     "glaive": 153

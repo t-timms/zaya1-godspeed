@@ -7,6 +7,27 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json&style=flat-square)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](./LICENSE)
 
+> ## ⚠️ Status, 2026-09-04 — read before using the published checkpoints
+>
+> **The two published checkpoints do not load on a current stack.** They were built
+> from the pre-refactor 80-layer `ZAYA1-8B` and fail at engine init with
+> `KeyError: 'hybrid'` on transformers 5.x. Known-good only on the
+> transformers 4.57.1 / vLLM 0.20.2 stack every number below was measured on.
+> Analysis: [`RESEARCH.md` §5.24](./RESEARCH.md).
+>
+> **A rebuild from the refactored base loads, but does not yet generate coherent
+> text — and the cause is upstream, not in this repo.** vLLM's NVFP4 MoE kernels
+> are broken on sm_120: three backends produce three *different* garbage outputs
+> from bit-identical weights, while the weights themselves verify at cosine 0.993
+> against the base. SM120 uses SM80-era `mma.sync` rather than SM100's
+> `tcgen05.mma`, and flashinfer ships no sm_120 FP4 cubins. Filed upstream as
+> vllm #33333 / #38971 / #31085. Full evidence:
+> [`RESEARCH.md` §5.25](./RESEARCH.md).
+>
+> Every performance and accuracy figure below was measured on the older stack and
+> is left unchanged — they were true as measured. Treat them as historical until
+> a checkpoint generates coherently on a current stack.
+
 **NVFP4 W4A4 inference for Zyphra's ZAYA1-8B on consumer Blackwell (RTX 5070 Ti, SM120)** —
 4-bit weights *and* 4-bit activations running on native CUTLASS FP4 tensor-core kernels,
 at **9.5 tok/s single-stream / ~74 tok/s batch-8** (`enforce_eager=True`; within a

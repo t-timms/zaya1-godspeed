@@ -314,3 +314,58 @@ ZAYA_MODEL_ID=Zyphra/ZAYA1-8B ~/quant-env/bin/python scripts/quantize_zaya_ct_nv
 Dry run was ~40 s of compute after a ~4 min load. The full run is 40 layers and
 826 samples rather than 4 and 8, so budget hours and run it detached under tmux.
 Steps 3-5 (load check, CUDA-graph sweep, re-eval) are unchanged.
+
+---
+
+## READ THIS FIRST — 2026-09-04. Steps 1-2 are DONE. Step 3 is blocked upstream.
+
+Everything above describes getting the quantizer working. It works. Full uniform
+build: **17.6 min**, `rc=0`, 2000/2000 Linears calibrated, **0 repaired**, flat
+0.03 GiB GPU. Six bugs were fixed to get there; see ROADMAP "CURRENT (2026-09-04)".
+
+**Do not start by re-running the quantizer. The blocker is the serving stack.**
+
+### What is actually broken
+
+vLLM's NVFP4 MoE kernels are wrong on sm_120. Three backends produce three
+*different* garbage outputs from bit-identical weights (FLASHINFER_CUTLASS,
+VLLM_CUTLASS, EMULATION). The weights themselves verify at **cosine 0.993** against
+the base. Full evidence and upstream issue list: **RESEARCH.md §5.25**.
+
+This is why `scripts/_debug-archive/wsl_fix_nvfp4_text_gen.py` exists — its fix #3
+replaces `CompressedTensorsW4A4Nvfp4MoEMethod` with manual dequant precisely
+because the stock path never worked on this card.
+
+### Start here instead
+
+```bash
+# 1. Restore Path A (manual dequant MoE) into the serving env, then:
+~/vllm-env/bin/python scripts/check_coherence.py \
+    --model ~/models/zaya-v2-uniform --mode NONE --write-reference \
+    --reference results/health/reference_pathA.json
+```
+
+**Read the generated text, not just the exit code.** The gate prints
+`n_tok / finish_reason / distinct_ids / text_len` per prompt and flags
+single-token collapse, but it passed a checkpoint that emitted fluent-looking
+word salad. `finish='stop'` with 1 token means the model chose to stop;
+`finish='length'` with empty text means pad collapse; plausible counts with
+nonsense text means neither. Open `results/health/reference_*.json` and read it.
+
+### Checkpoints on disk
+
+| path | what it is |
+|---|---|
+| `~/models/zaya-v2-uniform` | 7.06 GB, all scale fixes, **old ignore list** (router quantized, qkv excluded) |
+
+The router/qkv fix (`226fa4b`) is committed but **never built** — a rebuild should
+land near 6 GB, closer to the 5.80 GB reference build.
+
+### Gates that must hold on any rebuild
+
+| signal | required |
+|---|---|
+| `Linearized MoE experts: nn.Linear count` | `361 -> 2281` (80 means silent failure) |
+| `Verified weight_scale persisted on N modules` | must appear; aborts if scales did not stick |
+| `repaired from uncalibrated` | **0** — nonzero means invented activation scales |
+| `mem[layer N] cuda_alloc` | flat ~0.03 GiB; growth means the onload leak is back |

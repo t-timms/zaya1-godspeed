@@ -2122,3 +2122,102 @@ Checked by name analysis, no GPU:
   paired HellaSwag comparison and the generative suite have to be re-run before any
   number is reproduced on a card.
 - The §5.17a CUDA-graph sweep stays blocked until there is a checkpoint that loads.
+
+
+---
+
+## 5.25 The blocker is vLLM's NVFP4 MoE kernels on SM120, not the checkpoint
+
+*2026-09-04. Supersedes the working assumption behind §5.24 that a re-quantization
+would restore service. It restores loading, but not coherent generation, and the
+reason is upstream of this project.*
+
+### Observation
+
+Three vLLM MoE backends produce three **different** garbage outputs from
+bit-identical weights, same prompt, greedy, seed 0, on `zaya-v2-uniform`:
+
+| backend | output (first 60 chars) | distinct ids |
+|---|---|---:|
+| `FLASHINFER_CUTLASS` (auto-selected) | `A city of the capital of France is\n\n Theset ofClose…` | 29 |
+| `VLLM_CUTLASS` | `Would you have to: VeryCloseTimeIntervalReader…` | 24 |
+| `EMULATION` | `Partitions of a huge.\n\nLet a regionSeems of interest…` | 20 |
+
+Correct kernels computing the same GEMM must agree within numerical tolerance.
+These disagree **semantically**. At least one is wrong; the spread says more than
+one. Note also that each begins with a plausible English fragment and then
+degrades, which is what a numerically-drifting decode looks like rather than a
+structurally broken model.
+
+### The checkpoint is not the (only) problem
+
+Dequantised `model.layers.0.mlp.experts.0.gate_proj` directly from packed FP4 +
+FP8 block scales and compared against the untouched base tensor. Pure numerics, no
+vLLM, no CUDA kernels:
+
+```
+cosine similarity : 0.992978
+relative L1 error : 10.84%
+mean |err|        : 0.002302
+absmax deq/orig   : 0.4219 / 0.4004
+```
+
+Cosine 0.993 with ~11% L1 is textbook 4-bit fidelity over 16-element blocks.
+**Caveat, stated because it was over-read once already: this clears ONE tensor,
+not the 2,000-module artifact, and not the activation scales.**
+
+### Why: SM120 is not SM100
+
+- SM120 uses SM80-era `mma.sync`, **not** SM100's `tcgen05.mma`. Kernels written
+  for SM100 do not transfer.
+- `flashinfer-cubin` ships FP4 cubins for Sm100a/Sm100f/Sm103a — **none** for
+  sm_120/sm_121.
+- The native CUTLASS NVFP4 MoE path is reported broken on SM120 via TMA WS
+  grouped-GEMM initialisation failures.
+
+Upstream, unresolved, already filed:
+
+| issue | subject |
+|---|---|
+| vllm **#33333** | sm_120 NvFp4 MoE backend FLASHINFER_CUTLASS does not support the deployment configuration |
+| vllm **#38971** | NVFP4 MoE on SM120: no env override to select backend |
+| vllm **#31085** | Add SM120 support for native NVFP4 MoE kernels |
+| vllm **#24968** | PR: enable MoE support for SM_120 |
+| vllm **#30694** | CompressedTensors NVFP4A16 not supported for MoE (why W4A16 is not an option) |
+
+**Do not file another issue** — this ground is covered. The novel part is only the
+combination of evidence above, which belongs in a comment on #33333 if anywhere.
+
+### This project already knew
+
+`AGENTS.md:110-112` and §5.9 record that coherent output required three vLLM
+patches, the third being a full rewrite of `CompressedTensorsW4A4Nvfp4MoEMethod`
+into "Path A" — on-the-fly Python dequant with a manual per-expert SwiGLU loop —
+because Marlin corrupts scales on sm_120 and `fused_experts` returns zero for
+constant-routed warmup batches. **The stock MoE path never worked on this card.**
+That file is `scripts/_debug-archive/wsl_fix_nvfp4_text_gen.py`, still intact.
+
+### Prior art worth diffing against
+
+- `switzerchees/ZAYA1-8B-NVFP4` — ModelOpt 0.44.0, legacy base, 5.80 GB, 128
+  calibration samples @ seq 2048, excludes `*lm_head* *embed_tokens* *router*
+  *conv_qk*`. Its `quant_method: modelopt` takes vLLM's separately-maintained
+  ModelOpt loader.
+- `lna-lab/blackwell-geforce-nvfp4-gemm` — SM120 patches for vLLM + FlashInfer +
+  CUTLASS covering MoE grouped GEMM; 175 tok/s Qwen3.6-35B-A3B, 160 tok/s
+  Gemma4-26B-A4B, on this GPU class. Dated 2026-04; its
+  `CutlassExpertsFp4._supports_current_device` patch is **already upstream** in our
+  vLLM 0.26.0 (family 120 accepted at `experts/cutlass_moe.py:693`), so the rest
+  may not apply cleanly.
+
+### Routes, in the order I would take them
+
+1. **Restore Path A** (`_debug-archive/wsl_fix_nvfp4_text_gen.py` fix #3). Known
+   good on this model and this GPU. Slow — Python dequant per forward — but it is
+   the only route that answers "is the checkpoint good?" using hardware we have.
+2. **ModelOpt re-export**, for a checkpoint that takes the maintained loader.
+3. **lna-lab patches**, for speed, once correctness is established.
+
+No control experiment fits locally: ZAYA1 bf16 is 17.7 GB and the smallest
+mainstream NVFP4 MoE checkpoints are 16.4 GB (gemma-4-26B-A4B) and 190 GB
+(GLM-5.3-Flash), against a 16 GB card.

@@ -942,3 +942,62 @@ vLLM serve (evaluation) → Godspeed 20-task benchmark → BFCL-v4
 - [Zyphra Transformers Fork](https://github.com/Zyphra/transformers/tree/zaya1)
 - [NVIDIA NIM — DeepSeek V4 Pro](https://build.nvidia.com/deepseek-ai/deepseek-v4-pro)
 - [Godspeed Coding Agent](https://github.com/t-timms/godspeed-coding-agent)
+
+
+---
+
+## ►► CURRENT (2026-09-04) — rebuild done, serving blocked on SM120 kernels
+
+**State in one line:** the quantizer is fixed and verified; vLLM's NVFP4 MoE
+kernels are broken on sm_120, which is documented upstream and is why this repo
+once shipped a hand-written MoE method.
+
+### Done — 6 verified bug fixes after the transformers-5 / refactored-base move
+
+| # | bug | commit |
+|---|---|---|
+| 1 | `apply_chat_template` returns `BatchEncoding`; calibration built from dict KEYS | `59bc382` |
+| 2 | rotary `forward(x, position_ids, layer_type)` → `None_inv_freq` | `f34185c` |
+| 3 | batched `nn.Parameter` experts invisible to `targets:["Linear"]` (80 vs 2000 Linears) | `cc44458` |
+| 4 | `ZayaDecoderLayer.forward` lost `residual`, returns a 2-tuple | `cc44458` |
+| 5 | offloaded experts unmovable; `align_modules` pins them → **+0.41 GiB/layer leak** | `1203640` |
+| 6 | **`weight_scale.data = x` silently dropped on offloaded modules** → all-zero scales → `<pad>` | `9e57749`, `5164928` |
+
+Plus: gate/up share one w13 global scale (`77ac9ef`); all-expert calibration,
+54→0 repaired (`888efce`); TriviaQA restored, 826→**979** samples (`fdd57f2`);
+ignore list re-derived for the refactored arch — it had been **quantizing the
+router** in all 40 layers (`226fa4b`).
+
+Build is now **17.6 min** (was 65) with flat 0.03 GiB GPU, `rc=0`,
+2000/2000 Linears calibrated, 0 repaired.
+
+### Blocked — see RESEARCH.md §5.25
+
+Three MoE backends give three **different** garbage outputs from identical
+weights. Weight fidelity is fine (cosine 0.993 vs base on a sampled expert
+tensor). SM120 uses SM80-era `mma.sync`, not SM100's `tcgen05.mma`; flashinfer
+ships no sm_120 FP4 cubins; CUTLASS grouped-GEMM MoE is reported broken on SM120.
+Covered by vllm #33333 / #38971 / #31085 / #24968 — **do not file another issue**.
+
+### Next, in order
+
+1. ⬜ **Restore Path A** from `scripts/_debug-archive/wsl_fix_nvfp4_text_gen.py`
+   fix #3 (manual dequant + per-expert SwiGLU). Known good on this model and GPU.
+   Slow, but it is the only route that establishes whether the checkpoint is
+   sound using hardware on hand.
+2. ⬜ Build the **router/qkv-corrected** checkpoint (`226fa4b` is committed but
+   never built). Expect ~6 GB, closer to the 5.80 GB reference.
+3. ⬜ Decide the shipping serving path: **ModelOpt re-export** (maintained loader,
+   proven on this model by switzerchees) vs **lna-lab SM120 patches** (160-175
+   tok/s on this GPU class, but 2026-04 vintage and partly upstreamed already).
+4. ⬜ **Evaluate.** Nothing has measured quality yet — only that it is not broken.
+5. ⬜ Republish cards; they currently carry a "does not load" notice that will
+   need replacing with whatever turns out to be true.
+
+### Open questions, unmeasured
+
+- SOAR is enabled by default and has never been A/B'd against plain max-abs. It
+  perturbs every activation scale by up to 2x.
+- Calibration is 979 samples @ 1024 tokens; the working reference used 128 @ 2048.
+  7.6x the cost, no measured benefit, and it is ~97% of build time.
+- Whole-checkpoint correctness is unproven; only one expert tensor was verified.
